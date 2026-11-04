@@ -1,0 +1,95 @@
+{
+  "//": "Layout mirrors the Waybar config of the sway rice 1:1.",
+  "opacity": "solid",
+  "modules-left": [
+    "workspaces",
+    "separator",
+    "screenshot",
+    "ime"
+  ],
+  "modules-center": [
+    "window"
+  ],
+  "modules-right": [
+    "sysinfo",
+    "launcher",
+    "notifications",
+    "power",
+    "clock",
+    "network"
+  ],
+  "modules": {
+    "workspaces": {
+      "type": "workspaces"
+    },
+    "window": {
+      "type": "window",
+      "max-length": 60
+    },
+    "separator": {
+      "type": "separator",
+      "format": "|"
+    },
+    "screenshot": {
+      "type": "custom",
+      "format": "",
+      "tooltip": "Screenshot / colour picker\nLeft: full screen   Middle: pick a colour   Right: drag a region",
+      "on-click": "i3-everforest-shot",
+      "on-click-right": "i3-everforest-shot region",
+      "on-middle": "i3-everforest-pick"
+    },
+    "ime": {
+      "type": "custom",
+      "format": "",
+      "tooltip": "Input method\nLeft: switch   Right: settings",
+      "on-click": "i3-everforest-ime toggle",
+      "on-click-right": "i3-everforest-ime config"
+    },
+    "sysinfo": {
+      "type": "graph",
+      "format": "{}",
+      "exec": "i3-everforest-sysinfo",
+      "interval": 2,
+      "tooltip": "Memory usage (line = CPU history)\nClick for a live view",
+      "on-click": "i3-everforest-sysinfo-monitor",
+      "on-click-right": "i3-everforest-sysinfo-monitor"
+    },
+    "launcher": {
+      "type": "custom",
+      "format": "",
+      "tooltip": "Application launcher\nMod+D",
+      "on-click": "rofi -show drun -theme i3-everforest"
+    },
+    "notifications": {
+      "type": "custom",
+      "format": "",
+      "tooltip": "Notifications\nClick to toggle do-not-disturb",
+      "on-click": "i3-everforest-notifications history",
+      "on-click-right": "i3-everforest-notifications toggle",
+      "on-middle": "i3-everforest-notifications clear"
+    },
+    "power": {
+      "type": "custom",
+      "format": "",
+      "tooltip": "Power menu",
+      "on-click": "i3-everforest-powermenu"
+    },
+    "clock": {
+      "type": "custom",
+      "clock": true,
+      "format": "{:%H:%M}",
+      "tooltip": "{:%A %d %B %Y}",
+      "on-click": "i3-everforest-calendar",
+      "on-click-right": "i3-everforest-calendar terminal"
+    },
+    "network": {
+      "type": "custom",
+      "format": "",
+      "exec": "i3-everforest-network",
+      "interval": 3,
+      "tooltip": "Click to scan networks\nRight click for connection details",
+      "on-click": "i3-everforest-wifi",
+      "on-click-right": "i3-everforest-wifi config"
+    }
+  }
+}
