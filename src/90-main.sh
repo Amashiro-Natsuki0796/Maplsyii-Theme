@@ -37,6 +37,10 @@ OPTIONS
   Install one component only:
       --only-dots  --only-theme  --only-wallpaper  --only-shell  --only-sddm
 
+  Optional software (the TUI also offers Zen Browser, VLC, OBS and fcitx5):
+      --firefox           Firefox from Mozilla's APT repo + zh-CN language pack
+      --no-firefox        skip it even in a non-interactive run
+
   Remove / inspect:
   -u, --uninstall         remove everything this script installed
       --keep-packages     with --uninstall: leave the apt packages alone
@@ -113,6 +117,8 @@ parse_args() {
 		--no-dots) DOTS=0 ;;
 		--no-session) SESSION=0 ;;
 		--no-shell) SHELLFX=0 ;;
+		--firefox) SOFT_FIREFOX=1 ;;
+		--no-firefox) SOFT_FIREFOX=0 ;;
 		--no-sddm) SDDM=0 ;;
 		--opacity) shift; BAR_OPACITY="${1:-solid}"; OPT_OPACITY_GIVEN=1 ;;
 		--opacity=*) BAR_OPACITY="${1#*=}"; OPT_OPACITY_GIVEN=1 ;;

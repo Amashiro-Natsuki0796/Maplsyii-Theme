@@ -313,6 +313,7 @@ tui_summary() {
 	row="  bar transparency: ${BAR_OPACITY}  (change with --opacity soft|clear)"
 	printf '%s│%s%-*s%s│%s\n' "${C_LIME}" "${C_RESET}${C_GREY}" "${inner}" "${row}" "${C_LIME}" "${C_RESET}"
 	local extra=""
+	[[ ${SOFT_FIREFOX:-0} -eq 1 ]] && extra+="firefox "
 	[[ ${SOFT_ZENNB:-0} -eq 1 ]] && extra+="zen "
 	[[ ${SOFT_VLC:-0} -eq 1 ]] && extra+="vlc "
 	[[ ${SOFT_OBS:-0} -eq 1 ]] && extra+="obs "
@@ -332,7 +333,8 @@ tui_summary() {
 #  Third page: extra software
 # ---------------------------------------------------------------------
 #  OPT keys for the optional applications. Each entry is "key|label|hint".
-OPT_SOFT_KEYS=( zennb vlc obs fcitx )
+OPT_SOFT_KEYS=( firefox zennb vlc obs fcitx )
+SOFT_FIREFOX=0
 SOFT_ZENNB=0
 SOFT_VLC=0
 SOFT_OBS=0
@@ -341,6 +343,7 @@ SOFT_FCITX=0
 soft_state() {
 	case "$1" in
 	zennb) [[ ${SOFT_ZENNB} -eq 1 ]] && printf 'x' || printf ' ' ;;
+	firefox) [[ ${SOFT_FIREFOX} -eq 1 ]] && printf 'x' || printf ' ' ;;
 	vlc)   [[ ${SOFT_VLC} -eq 1 ]] && printf 'x' || printf ' ' ;;
 	obs)   [[ ${SOFT_OBS} -eq 1 ]] && printf 'x' || printf ' ' ;;
 	fcitx) [[ ${SOFT_FCITX} -eq 1 ]] && printf 'x' || printf ' ' ;;
@@ -351,6 +354,7 @@ soft_set() {
 	local v="$2"
 	case "$1" in
 	zennb) SOFT_ZENNB=${v} ;;
+	firefox) SOFT_FIREFOX=${v} ;;
 	vlc)   SOFT_VLC=${v} ;;
 	obs)   SOFT_OBS=${v} ;;
 	fcitx) SOFT_FCITX=${v} ;;
@@ -359,6 +363,7 @@ soft_set() {
 
 soft_short() {
 	case "$1" in
+	firefox) printf 'Firefox        from Mozilla repo, with zh-CN locale' ;;
 	zennb) printf 'Zen Browser    private, Firefox-based (official installer)' ;;
 	vlc)   printf 'VLC            media player' ;;
 	obs)   printf 'OBS Studio     screen recording and streaming' ;;
@@ -368,6 +373,7 @@ soft_short() {
 
 soft_desc() {
 	case "$1" in
+	firefox) printf 'Mozilla APT repo (key fingerprint verified) + firefox-l10n-zh-cn.' ;;
 	zennb) printf 'Official installer: curl -fsSL https://updates.zen-browser.app/install.sh | bash' ;;
 	vlc)   printf 'Plays almost every audio and video format.' ;;
 	obs)   printf 'X11 capture; records the screen through the X composite extension.' ;;
@@ -433,10 +439,10 @@ tui_soft_menu() {
 			return 2
 			;;
 		a|A|all)
-			SOFT_ZENNB=1; SOFT_VLC=1; SOFT_OBS=1; SOFT_FCITX=1
+			SOFT_FIREFOX=1; SOFT_ZENNB=1; SOFT_VLC=1; SOFT_OBS=1; SOFT_FCITX=1
 			;;
 		n|N|none)
-			SOFT_ZENNB=0; SOFT_VLC=0; SOFT_OBS=0; SOFT_FCITX=0
+			SOFT_FIREFOX=0; SOFT_ZENNB=0; SOFT_VLC=0; SOFT_OBS=0; SOFT_FCITX=0
 			;;
 		*)
 			if [[ "${input}" =~ ^[1-4]+$ ]]; then

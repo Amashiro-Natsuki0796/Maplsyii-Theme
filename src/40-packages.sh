@@ -196,7 +196,7 @@ install_optional_software() {
 	fi
 
 	local any=0
-	[[ ${SOFT_ZENNB:-0} -eq 1 || ${SOFT_VLC:-0} -eq 1 || ${SOFT_OBS:-0} -eq 1 || ${SOFT_FCITX:-0} -eq 1 ]] && any=1
+	[[ ${SOFT_FIREFOX:-0} -eq 1 || ${SOFT_ZENNB:-0} -eq 1 || ${SOFT_VLC:-0} -eq 1 || ${SOFT_OBS:-0} -eq 1 || ${SOFT_FCITX:-0} -eq 1 ]] && any=1
 	[[ ${any} -eq 1 ]] || return 0
 
 	ui_hdr "Optional software"
@@ -217,6 +217,9 @@ install_optional_software() {
 	# Freshly installed here, so its session wiring has to be written now.
 	if [[ ${SOFT_FCITX:-0} -eq 1 && ${OPT_DRY_RUN} -eq 0 ]]; then
 		write_fcitx_env
+	fi
+	if [[ ${SOFT_FIREFOX:-0} -eq 1 ]]; then
+		install_firefox || ui_warn "Firefox could not be installed"
 	fi
 	if [[ ${SOFT_ZENNB:-0} -eq 1 ]]; then
 		install_zen_browser || ui_warn "Zen Browser could not be installed"
@@ -419,6 +422,156 @@ FCCONFIG
 # The installer needs no root: it writes into the target user's home, so it is
 # run as that user.
 ZEN_INSTALL_URL="https://updates.zen-browser.app/install.sh"
+
+# Mozilla's APT repository, so Firefox comes from Mozilla rather than from
+# Debian's ESR build (which lags several major versions behind).
+#
+# The steps and the fingerprint are exactly what Mozilla documents for Debian
+# and Ubuntu. Two details differ per release:
+#   - Debian 13 (trixie) / Ubuntu 24.10+ need the deb822 ".sources" format;
+#     older releases use the one-line "deb ..." form.
+#   - the GPG key must be imported to /etc/apt/keyrings before either.
+install_mozilla_repo() {
+	local keyring="/etc/apt/keyrings/packages.mozilla.org.asc"
+	local expected="35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3"
+
+	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
+		ui_dim "would configure the Mozilla APT repository"
+		return 0
+	fi
+
+	# wget is the tool Mozilla's instructions use; make sure it exists.
+	if ! command -v wget >/dev/null 2>&1; then
+		apt_install "wget" wget || return 1
+	fi
+	install -d -m 0755 /etc/apt/keyrings
+
+	if [[ ! -s "${keyring}" ]]; then
+		ui_step "importing the Mozilla signing key"
+		if ! wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg \
+			-O- >"${keyring}.part" 2>>"${LOG_FILE}"; then
+			ui_err "could not download the Mozilla signing key"
+			rm -f "${keyring}.part"
+			return 1
+		fi
+		mv "${keyring}.part" "${keyring}"
+		chmod 644 "${keyring}"
+	fi
+
+	# Verify the fingerprint - an unexpected key must never be trusted, since
+	# the repository is pinned above every other source below.
+	if command -v gpg >/dev/null 2>&1; then
+		local fp
+		fp=$(gpg -n -q --import --import-options import-show "${keyring}" 2>/dev/null |
+			awk '/pub/{getline; gsub(/^ +| +$/,""); print; exit}')
+		if [[ "${fp}" != "${expected}" ]]; then
+			ui_err "Mozilla key fingerprint mismatch (${fp:-none})"
+			return 1
+		fi
+		ui_dim "Mozilla key fingerprint verified"
+	fi
+
+	# Pick the source format from the actual distribution.
+	#
+	#   Debian 13 "trixie" and newer  -> deb822 ".sources"
+	#   Debian 12 "bookworm" and older-> one-line ".list"
+	#   Ubuntu 24.10+                 -> deb822
+	#   Ubuntu 24.04 and older        -> one-line
+	#
+	# Reading /etc/os-release in a subshell returns nothing, which is why the
+	# distribution has to be sourced here rather than captured with $(...).
+	local distro="" codename="" deb822=0
+	if [[ -r /etc/os-release ]]; then
+		# shellcheck disable=SC1091
+		. /etc/os-release
+		distro="${ID:-}"
+		codename="${VERSION_CODENAME:-}"
+		local ver="${VERSION_ID:-0}"
+	fi
+
+	case "${distro}" in
+	debian)
+		# trixie = 13, forky = 14; sid has no number and tracks the newest.
+		case "${codename}" in
+		trixie|forky|sid) deb822=1 ;;
+		"")
+			# No codename: fall back to the major version number.
+			[[ ${ver%%.*} -ge 13 ]] 2>/dev/null && deb822=1
+			;;
+		esac
+		;;
+	ubuntu)
+		# 24.10 "oracular" is the first release that expects deb822 here.
+		local major="${ver%%.*}" minor="${ver#*.}"
+		if [[ ${major} -gt 24 ]] 2>/dev/null; then
+			deb822=1
+		elif [[ ${major} -eq 24 ]] 2>/dev/null && [[ ${minor:-0} -ge 10 ]] 2>/dev/null; then
+			deb822=1
+		fi
+		;;
+	*)
+		# Unknown derivative: prefer deb822 when apt is new enough to parse it.
+		if apt-get --version 2>/dev/null | head -1 | grep -qE 'apt ([2-9]|[1-9][0-9])\.'; then
+			deb822=1
+		fi
+		;;
+	esac
+	ui_dim "distribution: ${distro:-unknown} ${codename:-} -> $([[ ${deb822} -eq 1 ]] && echo deb822 || echo 'one-line')"
+
+	if [[ ${deb822} -eq 1 ]]; then
+		rm -f /etc/apt/sources.list.d/mozilla.list
+		ui_step "writing the Mozilla source (deb822)"
+		cat >/etc/apt/sources.list.d/mozilla.sources <<EOF
+Types: deb
+URIs: https://packages.mozilla.org/apt
+Suites: mozilla
+Components: main
+Signed-By: ${keyring}
+EOF
+		chmod 644 /etc/apt/sources.list.d/mozilla.sources
+	else
+		rm -f /etc/apt/sources.list.d/mozilla.sources
+		ui_step "writing the Mozilla source (one-line)"
+		echo "deb [signed-by=${keyring}] https://packages.mozilla.org/apt mozilla main" \
+			>/etc/apt/sources.list.d/mozilla.list
+		chmod 644 /etc/apt/sources.list.d/mozilla.list
+	fi
+
+	# Pin Mozilla above every other origin, so "firefox" resolves to Mozilla's
+	# build even when Debian also ships one.
+	ui_step "pinning packages.mozilla.org at priority 1000"
+	cat >/etc/apt/preferences.d/mozilla <<EOF
+Package: *
+Pin: origin packages.mozilla.org
+Pin-Priority: 1000
+EOF
+	chmod 644 /etc/apt/preferences.d/mozilla
+
+	if ! apt-get update >>"${LOG_FILE}" 2>&1; then
+		ui_warn "apt-get update reported an error after adding Mozilla's repo"
+	fi
+	ui_ok "Mozilla APT repository configured"
+	return 0
+}
+
+# Firefox from Mozilla's repository, plus the Simplified Chinese language pack.
+install_firefox() {
+	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then ui_dim "would install Firefox"; return 0; fi
+
+	install_mozilla_repo || { ui_warn "Firefox skipped: the Mozilla repository is unavailable"; return 1; }
+
+	# firefox-l10n-* comes from the same repository, so it is installed in the
+	# same transaction - that also keeps the locale version in lockstep with
+	# the browser (a mismatched locale is silently ignored).
+	ui_step "installing Firefox + zh-CN language pack"
+	if apt_install "firefox" firefox firefox-l10n-zh-cn; then
+		ui_ok "Firefox installed: $(dpkg-query -W -f='${Version}' firefox 2>/dev/null)"
+		return 0
+	fi
+	ui_warn "the language pack is optional; retrying Firefox alone"
+	apt_install "firefox" firefox || return 1
+	return 0
+}
 
 install_zen_browser() {
 	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then

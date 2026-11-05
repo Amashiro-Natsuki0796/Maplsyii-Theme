@@ -109,21 +109,35 @@ text_width_sized(Bar *b, const char *text, double size, int weight)
 }
 
 /* Vertically centred text whose baseline keeps the glyph centred in the pill. */
+/* Draw text vertically centred in a box of height `box_h` that starts at y.
+ *
+ * Centring against the constant BAR_HEIGHT only works for full-height pills.
+ * A pill is 2*PILL_MARGIN shorter than the bar, so text centred on BAR_HEIGHT
+ * sat several pixels above the pill's middle - visible in the sysinfo control,
+ * whose memory figure is drawn inside a pill.
+ */
 void
-draw_text_n(Bar *b, int x, int y, const char *text, double size, int weight,
-            double r, double g, double bl)
+draw_text_in(Bar *b, int x, int y, int box_h, const char *text,
+             double size, int weight, double r, double g, double bl)
 {
 	PangoLayout *l = make_layout(b, text, size, weight);
 	int tw, th;
 	double ty;
 
 	pango_layout_get_pixel_size(l, &tw, &th);
-	ty = y + (BAR_HEIGHT - th) / 2.0;
+	ty = y + (box_h - th) / 2.0;
 
 	cairo_set_source_rgb(b->cr, r, g, bl);
 	cairo_move_to(b->cr, x, ty);
 	pango_cairo_show_layout(b->cr, l);
 	g_object_unref(l);
+}
+
+void
+draw_text_n(Bar *b, int x, int y, const char *text, double size, int weight,
+            double r, double g, double bl)
+{
+	draw_text_in(b, x, y, BAR_HEIGHT, text, size, weight, r, g, bl);
 }
 
 void

@@ -70,8 +70,11 @@ typedef struct {
 	int last_ws_count;
 	unsigned long last_ws;
 
-	/* Graph rectangle, recorded during layout for the fast repaint. */
+	/* The realtime band: memory text plus the CPU graph. The fast path
+	 * repaints this every frame, so it covers the whole sysinfo pill. */
 	int graph_x, graph_y, graph_w, graph_h;
+	/* The graph's own rectangle inside that band. */
+	int plot_x, plot_y, plot_w, plot_h;
 
 	/* Baseline image of the bar without any hover/press veil. Hover repaints
 	 * restore from here instead of re-running every module. */
@@ -131,6 +134,9 @@ void draw_pill(Bar *b, int x, int y, int w, int h, double r, double g, double bl
 void draw_pill_r(Bar *b, int x, int y, int w, int h, double radius,
                  double r, double g, double bl);
 void draw_text(Bar *b, int x, int y, const char *text, double r, double g, double bl);
+void sysinfo_outline(Bar *b, int bx, int by, int w, int bh);
+void draw_text_in(Bar *b, int x, int y, int box_h, const char *text,
+                  double size, int weight, double r, double g, double bl);
 void draw_text_n(Bar *b, int x, int y, const char *text, double size, int weight,
                  double r, double g, double bl);
 void draw_wifi(Bar *b, int x, int y, int w, int h, double r_top, double g_top, double bl_top, double r_mid, double g_mid, double bl_mid, double r_dot, double g_dot, double bl_dot);

@@ -1194,6 +1194,16 @@ blur-background-exclude = [
     "class_g = 'slop'",
     "class_g = 'i3-everforest-tooltip'",
     "window_type = 'desktop'",
+    # Context menus are ARGB popups, so picom blurred everything behind them and
+    # every right-click menu ended up wrapped in a frosted halo. They are small,
+    # text-dense and open for a second - blur only makes them harder to read.
+    "window_type = 'popup_menu'",
+    "window_type = 'dropdown_menu'",
+    "window_type = 'menu'",
+    "window_type = 'combo'",
+    "window_type = 'tooltip'",
+    "window_type = 'notification'",
+    "window_type = 'dnd'",
 ];
 
 # Shadows: subtle, so the 1px Everforest border stays the visual edge.
@@ -1209,6 +1219,14 @@ shadow-exclude = [
     "class_g = 'i3-everforest-tooltip'",
     "class_g = 'i3-frame'",
     "_NET_WM_WINDOW_TYPE@:a = 'DOCK'",
+    # Context menus: the shadow offset is negative, so it lands on the right and
+    # bottom edges and reads as a translucent border around every right-click
+    # menu. Menus already have their own border.
+    "window_type = 'popup_menu'",
+    "window_type = 'dropdown_menu'",
+    "window_type = 'menu'",
+    "window_type = 'combo'",
+    "window_type = 'tooltip'",
 ];
 
 # Alacritty, the launcher and the notification daemon carry their own alpha

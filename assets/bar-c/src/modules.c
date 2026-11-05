@@ -11,14 +11,49 @@
 
 #include "bar.h"
 
+/* Trim a byte string so it ends on a UTF-8 character boundary.
+ *
+ * fgets() stops mid-character when a window title is longer than the buffer,
+ * and the resulting partial sequence made Pango warn "Invalid UTF-8 string" on
+ * every repaint - thousands of lines a second. Backing up to the start of the
+ * truncated character keeps the text valid.
+ */
+static void
+trim_utf8(char *s)
+{
+	size_t len = strlen(s);
+
+	if (len == 0)
+		return;
+	for (size_t i = len; i > 0 && i > len - 4; i--) {
+		unsigned char c = (unsigned char)s[i - 1];
+
+		if ((c & 0xC0) != 0x80) {
+			size_t need = (c < 0x80) ? 1 : (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+
+			if (i - 1 + need > len)
+				s[i - 1] = '\0';
+			return;
+		}
+	}
+	s[len - (len > 3 ? 3 : len)] = '\0';
+}
+
 static void
 capture(const char *cmd, char *out, size_t n)
 {
 	FILE *f = popen(cmd, "r");
+	char *nl;
+
 	if (!f) { out[0] = '\0'; return; }
 	if (!fgets(out, (int)n, f))
 		out[0] = '\0';
-	out[strcspn(out, "\n")] = '\0';
+	nl = strchr(out, '\n');
+	if (nl)
+		*nl = '\0';
+	else
+		out[n - 1] = '\0';
+	trim_utf8(out);
 	pclose(f);
 }
 
@@ -236,6 +271,34 @@ module_draw_cpu_graph_at(Bar *b, cairo_t *cr, int x, int y, int w, int h)
 	cairo_restore(cr);
 }
 
+/* Hairline outline around the sysinfo pill.
+ *
+ * The pill is only a shade lighter than the bar, so without this the control's
+ * edges are hard to see. Shared by the full draw and the 30Hz realtime band:
+ * when the band repainted the pill without it, hovering made the outline
+ * flicker away and come back.
+ */
+void
+sysinfo_outline(Bar *b, int bx, int by, int w, int bh)
+{
+	cairo_t *cr = b->cr;
+	double r = PILL_RADIUS;
+	double x0 = bx + 0.5, y0 = by + 0.5;
+	double x1 = bx + w - 0.5, y1 = by + bh - 0.5;
+
+	cairo_save(cr);
+	cairo_set_source_rgb(cr, SYSINFO_EDGE);
+	cairo_set_line_width(cr, SYSINFO_EDGE_W);
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, x1 - r, y0 + r, r, -M_PI / 2, 0);
+	cairo_arc(cr, x1 - r, y1 - r, r, 0, M_PI / 2);
+	cairo_arc(cr, x0 + r, y1 - r, r, M_PI / 2, M_PI);
+	cairo_arc(cr, x0 + r, y0 + r, r, M_PI, 3 * M_PI / 2);
+	cairo_close_path(cr);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
 int
 module_sysinfo(Bar *b, int x, int y, int h)
 {
@@ -249,34 +312,29 @@ module_sysinfo(Bar *b, int x, int y, int h)
 		int bh = h - 2 * PILL_MARGIN;
 
 		draw_pill(b, bx, by, w, bh, C_PILL);
-		/* Hairline outline: the pill is only a shade lighter than the bar, so
-		 * without it the control's edges are hard to see. */
-		{
-			cairo_set_source_rgb(b->cr, SYSINFO_EDGE);
-			cairo_set_line_width(b->cr, SYSINFO_EDGE_W);
-			{
-				double r = PILL_RADIUS;
-				double x0 = bx + 0.5, y0 = by + 0.5;
-				double x1 = bx + w - 0.5, y1 = by + bh - 0.5;
-
-				cairo_new_sub_path(b->cr);
-				cairo_arc(b->cr, x1 - r, y0 + r, r, -M_PI/2, 0);
-				cairo_arc(b->cr, x1 - r, y1 - r, r, 0, M_PI/2);
-				cairo_arc(b->cr, x0 + r, y1 - r, r, M_PI/2, M_PI);
-				cairo_arc(b->cr, x0 + r, y0 + r, r, M_PI, 3*M_PI/2);
-				cairo_close_path(b->cr);
-				cairo_stroke(b->cr);
-			}
-		}
-		draw_text(b, bx + PAD_SYSINFO, y, label, C_WHITE);
+		sysinfo_outline(b, bx, by, w, bh);
+		/* Centre in the pill, not in the bar: the pill is 2*PILL_MARGIN
+		 * shorter, so bar-centred text sat visibly high. */
+		draw_text_in(b, bx + PAD_SYSINFO, by, bh, label,
+		             FONT_SIZE, FONT_WEIGHT, C_WHITE);
 
 		/* Remember where the graph is so the 30Hz path can clip to it. */
-		b->graph_x = bx + PAD_SYSINFO + tw + SYSINFO_LABEL_PAD + 6;
-		b->graph_y = by + (bh - GRAPH_HEIGHT) / 2;
-		b->graph_w = GRAPH_WIDTH;
-		b->graph_h = GRAPH_HEIGHT;
+		/* The fast path repaints this rectangle every frame, so it must cover
+		 * the memory text as well as the graph. It used to be the graph alone,
+		 * which left the percentage frozen at whatever value the last full
+		 * redraw happened to draw - it only moved when the pointer entered the
+		 * bar and forced one. */
+		b->graph_x = bx;
+		b->graph_y = by;
+		b->graph_w = w;
+		b->graph_h = bh;
+		/* Where the graph itself starts, for the actual plot. */
+		b->plot_x = bx + PAD_SYSINFO + tw + SYSINFO_LABEL_PAD + 6;
+		b->plot_y = by + (bh - GRAPH_HEIGHT) / 2;
+		b->plot_w = GRAPH_WIDTH;
+		b->plot_h = GRAPH_HEIGHT;
 
-		module_draw_cpu_graph(b, b->graph_x, b->graph_y,
+		module_draw_cpu_graph(b, b->plot_x, b->plot_y,
 		                      GRAPH_WIDTH, GRAPH_HEIGHT);
 
 		add_region(b, bx, by, w, bh,
