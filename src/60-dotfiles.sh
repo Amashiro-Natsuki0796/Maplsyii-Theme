@@ -195,7 +195,16 @@ exec --no-startup-id xwallpaper --zoom "$wall"
 for_window [class="^i3-everforest-bar-c$"] floating enable, border none
 for_window [class="^i3-everforest-bar-c$"] move position 0 px 0 px
 for_window [class="^i3-everforest-bar-c$"] sticky enable
-exec --no-startup-id i3-everforest-bar
+# exec_always, not exec: a plain `exec` runs once per i3 *start*, so
+# `i3-msg restart` left the desktop with no bar at all. exec_always re-runs on
+# every reload, which is what makes the bar come back after a reload.
+#
+# It re-runs unconditionally, so two details matter:
+#   - guard with pgrep, or every reload would add another bar
+#   - start it with `&`, not `exec`: `exec` replaces the shell that i3 waits
+#     on, and i3 then treats the long-lived bar as a command that never
+#     returns.
+exec_always --no-startup-id sh -c 'pgrep -f "/usr/local/bin/i3-everforest-bar$" >/dev/null 2>&1 || /usr/local/bin/i3-everforest-bar &'
 exec --no-startup-id i3-everforest-border
 exec --no-startup-id i3-everforest-wifi-cache
 exec --no-startup-id i3-everforest-idle

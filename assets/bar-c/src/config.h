@@ -96,7 +96,7 @@
  * the dot is white, the middle arc pink, the outer arc blue. */
 #define WIFI_DOT      RGB(0xFE, 0xFE, 0xFE)   /* #FEFEFE - the flag's white */
 #define WIFI_MID      RGB(0xF4, 0xA7, 0xB9)   /* #F4A7B9 - pink, middle arc */
-#define WIFI_TOP      RGB(0x59, 0xCC, 0xF9)   /* #59CCF9 - blue, outer arc  */
+#define WIFI_TOP      RGB(0x7D, 0xD6, 0xFB)   /* #7DD6FB - light blue, outer arc */
 /* Stroke width from the original glyph: its arcs are ~2.5px thick at 18px
  * wide, not the hairline 1.6px an earlier pass used. */
 #define WIFI_STROKE   2.5
