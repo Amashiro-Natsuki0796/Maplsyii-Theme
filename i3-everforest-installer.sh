@@ -2764,10 +2764,19 @@ write_st() {
 		return 0
 	fi
 
+	# Rebuild when the installed binary predates the config the installer
+	# writes. Skipping on "already installed" alone meant a config change
+	# (a different chscale, say) never reached the binary on an existing
+	# machine - the installer reported success while the old build stayed in
+	# place.
 	if command -v st >/dev/null 2>&1 && \
 		"${bin}" -v 2>&1 | grep -q '^st-'; then
-		ui_dim "st already installed"
-		return 0
+		local stamp="${src}/.built-config"
+		if [[ -f "${stamp}" ]] && [[ "${stamp}" -nt "${bin}" ]]; then
+			ui_dim "st already installed"
+			return 0
+		fi
+		ui_step "rebuilding st (config changed)"
 	fi
 
 	if ! command -v make >/dev/null 2>&1 || ! command -v cc >/dev/null 2>&1; then
@@ -2854,6 +2863,17 @@ text = re.sub(r'^unsigned int defaultcs\s*=.*$', 'unsigned int defaultcs = 258;'
               text, flags=re.M)
 text = re.sub(r'^static unsigned int defaultrcs\s*=.*$',
               'static unsigned int defaultrcs = 259;', text, flags=re.M)
+
+# Line-height scale.
+#
+# A terminal cell is much taller than it is wide (about 8.4 x 19.6 px for
+# JetBrains Mono at pixelsize 14), so ASCII art built from square characters -
+# the Debian swirl in `mf` - is drawn about a third too tall. chscale shrinks
+# the line box, which brings that art back to roughly square and tightens the
+# line spacing at the same time. 0.85 is the point where the swirl measures
+# close to 1:1 without the text looking cramped.
+text = re.sub(r'^static float chscale\s*=.*$',
+              'static float chscale = 0.85;', text, flags=re.M)
 
 open(path, "w", encoding="utf-8").write(text)
 PYPATCH
@@ -2966,6 +2986,9 @@ PYPATCH3
 	if command -v setcap >/dev/null 2>&1; then
 		setcap cap_net_ext_admin+ep "${bin}" 2>/dev/null || true
 	fi
+	# Record the config this binary was built from, so a later run can tell
+	# whether it is stale (see the check at the top of this function).
+	printf '%s\n' "$(date -Is)" >"${src}/.built-config" 2>/dev/null || true
 	ui_ok "built ${bin}"
 }
 
@@ -3322,14 +3345,6 @@ shadow-exclude = [
     "class_g = 'i3-everforest-tooltip'",
     "class_g = 'i3-frame'",
     "_NET_WM_WINDOW_TYPE@:a = 'DOCK'",
-    # Context menus: the shadow offset is negative, so it lands on the right and
-    # bottom edges and reads as a translucent border around every right-click
-    # menu. Menus already have their own border.
-    "window_type = 'popup_menu'",
-    "window_type = 'dropdown_menu'",
-    "window_type = 'menu'",
-    "window_type = 'combo'",
-    "window_type = 'tooltip'",
 ];
 
 # Alacritty, the launcher and the notification daemon carry their own alpha
@@ -3627,8 +3642,17 @@ for t in /sys/class/thermal/thermal_zone*/temp; do
 	if [[ -n "$v" ]]; then temp="$((v / 1000))C"; break; fi
 done
 
-gpu=""
-if have lspci; then gpu="$(lspci 2>/dev/null | awk -F': ' '/VGA|3D controller/{print $2; exit}')"; fi
+# GPUs: one entry per adapter, one row each.
+#
+# The machine has two (an AMD APU and an NVIDIA card), so the whole lspci
+# description is kept verbatim - vendor, chip and silicon revision - and each
+# adapter gets its own row.
+gpus=()
+if have lspci; then
+	while IFS= read -r g; do
+		if [[ -n "${g}" ]]; then gpus+=("${g}"); fi
+	done < <(lspci 2>/dev/null | awk -F': ' '/VGA|3D controller|Display controller/{print $2}')
+fi
 
 mem_total="$(awk '/MemTotal/{print $2}' /proc/meminfo)"
 mem_avail="$(awk '/MemAvailable/{print $2}' /proc/meminfo)"
@@ -3670,7 +3694,15 @@ info+=("${blue}Session${reset}:    ${fg}${sess}${reset}")
 info+=("${blue}Packages${reset}:   ${fg}${pkgs} (dpkg)${reset}")
 info+=("${blue}${RULE}${reset}")
 info+=("${blue}CPU${reset}:        ${fg}${cpu}${temp:+ ${yellow}${temp}${reset}}")
-[[ -n "${gpu}" ]] && info+=("${blue}GPU${reset}:        ${fg}${gpu}${reset}")
+# One row per adapter; the label only appears on the first so the column
+# reads as a list rather than repeating "GPU:".
+for i in "${!gpus[@]}"; do
+	if ((i == 0)); then
+		info+=("${blue}GPU${reset}:        ${fg}${gpus[i]}${reset}")
+	else
+		info+=("${blue}            ${fg}${gpus[i]}${reset}")
+	fi
+done
 info+=("${blue}Memory${reset}:     ${fg}${mem_used} MiB / ${mem_total} MiB${reset}")
 if [[ -n "${res}" ]]; then info+=("${blue}Resolution${reset}: ${fg}${res}${reset}"); fi
 info+=("${blue}Cores${reset}:      ${fg}${cores}${reset}")
@@ -3679,26 +3711,30 @@ if [[ -n "${battery}" ]]; then
 	info+=("${blue}Battery${reset}:    ${fg}${battery}% ${bstate}${reset}")
 fi
 
-# Debian swirl (classic ascii logo)
-logo=()
-while IFS= read -r line; do logo+=("${line}"); done <<'LOGO'
-         _,met$$$$$gg.
-      ,g$$$$$$$$$$$$$$$P.
-    ,g$$P"       """Y$$.".
-   ,$$P'              `$$$.
-  ',$$P       ,ggs.     `$$b:
-  `d$$'     ,$P"'   .    $$$
-   $$P      d$'     ,    $$P
-   $$:      $$.   -    ,d$$'
-   $$;      Y$b._   _,d$P'
-   Y$$.    `.`"Y$$$$P"'
-   `$$b      "-.__
-    `Y$$
-     `Y$$.
-       `$$b.
-         `Y$$b.
-            `"Y$b._
-                `""""
+	# Debian swirl: the standard 17-row neofetch art, unmodified.
+	#
+	# An earlier attempt redrew it as 13 rows to compensate for the terminal
+	# cell being taller than it is wide, but cutting rows off the bottom left the
+	# swirl visibly truncated. The art is kept verbatim instead.
+	logo=()
+	while IFS= read -r line; do logo+=("${line}"); done <<'LOGO'
+       _,met$$$$$gg.
+    ,g$$$$$$$$$$$$$$$P.
+  ,g$$P"     """Y$$.".
+ ,$$P'              `$$$.
+',$$P       ,ggs.     `$$b:
+`d$$'     ,$P"'   .    $$$
+ $$P      d$'     ,    $$P
+ $$:      $$.   -    ,d$$'
+ $$;      Y$b._   _,d$P'
+ Y$$.    `.`"Y$$$$P"'
+ `$$b      "-.__
+  `Y$$
+   `Y$$.
+     `$$b.
+       `Y$$b.
+          `"Y$b._
+              `""""
 LOGO
 
 # column widths

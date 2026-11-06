@@ -58,8 +58,17 @@ for t in /sys/class/thermal/thermal_zone*/temp; do
 	if [[ -n "$v" ]]; then temp="$((v / 1000))C"; break; fi
 done
 
-gpu=""
-if have lspci; then gpu="$(lspci 2>/dev/null | awk -F': ' '/VGA|3D controller/{print $2; exit}')"; fi
+# GPUs: one entry per adapter, one row each.
+#
+# The machine has two (an AMD APU and an NVIDIA card), so the whole lspci
+# description is kept verbatim - vendor, chip and silicon revision - and each
+# adapter gets its own row.
+gpus=()
+if have lspci; then
+	while IFS= read -r g; do
+		if [[ -n "${g}" ]]; then gpus+=("${g}"); fi
+	done < <(lspci 2>/dev/null | awk -F': ' '/VGA|3D controller|Display controller/{print $2}')
+fi
 
 mem_total="$(awk '/MemTotal/{print $2}' /proc/meminfo)"
 mem_avail="$(awk '/MemAvailable/{print $2}' /proc/meminfo)"
@@ -101,7 +110,15 @@ info+=("${blue}Session${reset}:    ${fg}${sess}${reset}")
 info+=("${blue}Packages${reset}:   ${fg}${pkgs} (dpkg)${reset}")
 info+=("${blue}${RULE}${reset}")
 info+=("${blue}CPU${reset}:        ${fg}${cpu}${temp:+ ${yellow}${temp}${reset}}")
-[[ -n "${gpu}" ]] && info+=("${blue}GPU${reset}:        ${fg}${gpu}${reset}")
+# One row per adapter; the label only appears on the first so the column
+# reads as a list rather than repeating "GPU:".
+for i in "${!gpus[@]}"; do
+	if ((i == 0)); then
+		info+=("${blue}GPU${reset}:        ${fg}${gpus[i]}${reset}")
+	else
+		info+=("${blue}            ${fg}${gpus[i]}${reset}")
+	fi
+done
 info+=("${blue}Memory${reset}:     ${fg}${mem_used} MiB / ${mem_total} MiB${reset}")
 if [[ -n "${res}" ]]; then info+=("${blue}Resolution${reset}: ${fg}${res}${reset}"); fi
 info+=("${blue}Cores${reset}:      ${fg}${cores}${reset}")
@@ -110,26 +127,30 @@ if [[ -n "${battery}" ]]; then
 	info+=("${blue}Battery${reset}:    ${fg}${battery}% ${bstate}${reset}")
 fi
 
-# Debian swirl (classic ascii logo)
-logo=()
-while IFS= read -r line; do logo+=("${line}"); done <<'LOGO'
-         _,met$$$$$gg.
-      ,g$$$$$$$$$$$$$$$P.
-    ,g$$P"       """Y$$.".
-   ,$$P'              `$$$.
-  ',$$P       ,ggs.     `$$b:
-  `d$$'     ,$P"'   .    $$$
-   $$P      d$'     ,    $$P
-   $$:      $$.   -    ,d$$'
-   $$;      Y$b._   _,d$P'
-   Y$$.    `.`"Y$$$$P"'
-   `$$b      "-.__
-    `Y$$
-     `Y$$.
-       `$$b.
-         `Y$$b.
-            `"Y$b._
-                `""""
+	# Debian swirl: the standard 17-row neofetch art, unmodified.
+	#
+	# An earlier attempt redrew it as 13 rows to compensate for the terminal
+	# cell being taller than it is wide, but cutting rows off the bottom left the
+	# swirl visibly truncated. The art is kept verbatim instead.
+	logo=()
+	while IFS= read -r line; do logo+=("${line}"); done <<'LOGO'
+       _,met$$$$$gg.
+    ,g$$$$$$$$$$$$$$$P.
+  ,g$$P"     """Y$$.".
+ ,$$P'              `$$$.
+',$$P       ,ggs.     `$$b:
+`d$$'     ,$P"'   .    $$$
+ $$P      d$'     ,    $$P
+ $$:      $$.   -    ,d$$'
+ $$;      Y$b._   _,d$P'
+ Y$$.    `.`"Y$$$$P"'
+ `$$b      "-.__
+  `Y$$
+   `Y$$.
+     `$$b.
+       `Y$$b.
+          `"Y$b._
+              `""""
 LOGO
 
 # column widths

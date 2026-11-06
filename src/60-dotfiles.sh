@@ -661,10 +661,19 @@ write_st() {
 		return 0
 	fi
 
+	# Rebuild when the installed binary predates the config the installer
+	# writes. Skipping on "already installed" alone meant a config change
+	# (a different chscale, say) never reached the binary on an existing
+	# machine - the installer reported success while the old build stayed in
+	# place.
 	if command -v st >/dev/null 2>&1 && \
 		"${bin}" -v 2>&1 | grep -q '^st-'; then
-		ui_dim "st already installed"
-		return 0
+		local stamp="${src}/.built-config"
+		if [[ -f "${stamp}" ]] && [[ "${stamp}" -nt "${bin}" ]]; then
+			ui_dim "st already installed"
+			return 0
+		fi
+		ui_step "rebuilding st (config changed)"
 	fi
 
 	if ! command -v make >/dev/null 2>&1 || ! command -v cc >/dev/null 2>&1; then
@@ -751,6 +760,17 @@ text = re.sub(r'^unsigned int defaultcs\s*=.*$', 'unsigned int defaultcs = 258;'
               text, flags=re.M)
 text = re.sub(r'^static unsigned int defaultrcs\s*=.*$',
               'static unsigned int defaultrcs = 259;', text, flags=re.M)
+
+# Line-height scale.
+#
+# A terminal cell is much taller than it is wide (about 8.4 x 19.6 px for
+# JetBrains Mono at pixelsize 14), so ASCII art built from square characters -
+# the Debian swirl in `mf` - is drawn about a third too tall. chscale shrinks
+# the line box, which brings that art back to roughly square and tightens the
+# line spacing at the same time. 0.85 is the point where the swirl measures
+# close to 1:1 without the text looking cramped.
+text = re.sub(r'^static float chscale\s*=.*$',
+              'static float chscale = 0.85;', text, flags=re.M)
 
 open(path, "w", encoding="utf-8").write(text)
 PYPATCH
@@ -863,6 +883,9 @@ PYPATCH3
 	if command -v setcap >/dev/null 2>&1; then
 		setcap cap_net_ext_admin+ep "${bin}" 2>/dev/null || true
 	fi
+	# Record the config this binary was built from, so a later run can tell
+	# whether it is stale (see the check at the top of this function).
+	printf '%s\n' "$(date -Is)" >"${src}/.built-config" 2>/dev/null || true
 	ui_ok "built ${bin}"
 }
 
@@ -1219,14 +1242,6 @@ shadow-exclude = [
     "class_g = 'i3-everforest-tooltip'",
     "class_g = 'i3-frame'",
     "_NET_WM_WINDOW_TYPE@:a = 'DOCK'",
-    # Context menus: the shadow offset is negative, so it lands on the right and
-    # bottom edges and reads as a translucent border around every right-click
-    # menu. Menus already have their own border.
-    "window_type = 'popup_menu'",
-    "window_type = 'dropdown_menu'",
-    "window_type = 'menu'",
-    "window_type = 'combo'",
-    "window_type = 'tooltip'",
 ];
 
 # Alacritty, the launcher and the notification daemon carry their own alpha
