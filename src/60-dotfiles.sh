@@ -40,9 +40,12 @@ write_i3() {
 # Modifier: Super. This is the same layout the reference rice uses, ported
 # from sway to i3 on X11: identical keybindings, identical colours.
 set $mod Mod4
-# The rice's terminal is foot, which is Wayland-only. kitty replaces it with
-# foot.ini's font, padding, 60% alpha, palette and cursor ported over, so the
-# terminal looks the same. See write_kitty().
+# The rice's terminal is foot, which is Wayland-only, so st takes its place:
+# foot.ini's font, padding, 60% alpha, palette and cursor are carried over and
+# the terminal looks the same at a fraction of the memory. st is also
+# registered as the desktop's default terminal (x-terminal-emulator and
+# $TERMINAL) by write_default_terminal(), so this binding and every other tool
+# that asks for "a terminal" agree.
 set $term st
 set $menu rofi -show drun -theme i3-everforest
 set $files pcmanfm ~
@@ -608,6 +611,92 @@ FOOT
 
 
 
+write_default_terminal() {
+	# Make st the terminal the rest of the desktop reaches for.
+	#
+	# Setting $term in the i3 config only covers Mod+Return. Everything else
+	# that wants "a terminal" - `x-terminal-emulator`, xdg-open on a .desktop
+	# entry with Terminal=true, `sensible-terminal`, an editor's :terminal,
+	# the i3-everforest helpers - goes through one of three paths, and all
+	# three have to agree or the desktop ends up with two different terminals
+	# depending on how it was launched:
+	#
+	#   1. Debian's x-terminal-emulator alternative. st is not packaged, so it
+	#      has no alternative of its own; register one.
+	#   2. $TERMINAL, which most lightweight tools check first. Put it in
+	#      ~/.xsessionrc next to the other session exports.
+	#   3. The i3 config's $term, handled by write_i3().
+	#
+	# foot is the fallback: it is the rice's original terminal and the only
+	# other one installed as a package, so it works on a machine where the st
+	# build failed (no C toolchain, download blocked).
+	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
+		ui_dim "would make st the default terminal"
+		return 0
+	fi
+
+	local target=""
+	if [[ -x /usr/local/bin/st ]]; then
+		target="/usr/local/bin/st"
+	elif have foot; then
+		target="$(command -v foot)"
+		ui_dim "st is not built - using foot as the default terminal"
+	elif have kitty; then
+		target="$(command -v kitty)"
+	fi
+
+	if [[ -z "${target}" ]]; then
+		ui_warn "no terminal emulator found - default terminal left alone"
+		return 0
+	fi
+
+	# 1. Register with Debian's alternatives system. --install is idempotent
+	# (it replaces the entry with the same path), and the manual selection
+	# pins it so a later package install cannot silently take the slot back.
+	if have update-alternatives; then
+		if update-alternatives --install /usr/bin/x-terminal-emulator \
+			x-terminal-emulator "${target}" 60 >/dev/null 2>&1; then
+			update-alternatives --set x-terminal-emulator "${target}" \
+				>/dev/null 2>&1 || true
+			ui_ok "x-terminal-emulator -> ${target}"
+		else
+			ui_warn "could not register ${target} with update-alternatives"
+		fi
+	fi
+
+	# 2. $TERMINAL for the tools that do not consult alternatives.
+	local term="${target##*/}"
+	local xsr="${HOME_DIR}/.xsessionrc"
+	local marker_begin="# >>> i3-everforest >>>"
+	if [[ -f "${xsr}" ]] && grep -qF "${marker_begin}" "${xsr}" 2>/dev/null; then
+		if ! grep -qx "export TERMINAL=${term}" "${xsr}" 2>/dev/null; then
+			# Replace an existing line if there is one, otherwise insert before
+			# the closing marker. `sed /pat/i text` is not portable (GNU sed
+			# needs the text on its own line, and the busybox form differs), so
+			# this rewrites through awk instead of guessing.
+			local tmp
+			tmp="$(mktemp)"
+			awk -v want="export TERMINAL=${term}" '
+				$0 ~ /^export TERMINAL=/ { if (!done) { print want; done=1 } ; next }
+				/^# <<< i3-everforest <<</ && !done { print want; done=1 }
+				{ print }
+			' "${xsr}" >"${tmp}" 2>/dev/null &&
+				cp "${tmp}" "${xsr}" 2>/dev/null
+			rm -f "${tmp}"
+			chown_user "${xsr}" 2>/dev/null || true
+			ui_dim "TERMINAL=${term} set in ${xsr}"
+		fi
+	fi
+
+	# 3. The .desktop entry is written by write_st_desktop() for st; foot and
+	# kitty ship their own with the package, so there is nothing to add here.
+	# It matters because rofi and the file manager read those entries, not
+	# $TERMINAL.
+
+	ui_ok "default terminal: ${target}"
+	return 0
+}
+
 write_st_desktop() {
 	# st ships no .desktop file, so it never appeared in rofi's drun list.
 	local desk="/usr/local/share/applications/st.desktop"
@@ -692,6 +781,44 @@ write_st() {
 			return 0
 		}
 		tar xzf "${tarball}" -C "${src}" --strip-components=1 2>/dev/null
+	fi
+
+	# Scrollback, wheel scrolling, a scrollbar and Ctrl+click URLs.
+	#
+	# Plain st has no scrollback: the wheel was wired to Shift+Up/Down, so it
+	# only worked where the application asked for it, and anything that
+	# scrolled off the top was gone for good. Four patches fix that:
+	#
+	#   scrollback.diff     2000-line buffer, Shift+PageUp/PageDown to walk it
+	#   mouse.diff          the wheel scrolls the buffer without Shift; with
+	#                       Shift held the bytes still go to the application,
+	#                       which is what vim and less expect
+	#   url.diff            Ctrl underlines links, Ctrl+click opens them with
+	#                       xdg-open (so the desktop's browser is used)
+	#   scrollbar.diff      a translucent, rounded scrollbar on the right
+	#                       edge, draggable, hidden until there is history
+	#
+	# The first two are the upstream suckless patches for 0.9.2 verbatim. The
+	# last two are written for this installer: the upstream clickurl patch
+	# targets 0.8.5, does not apply here, and contains a search bug that
+	# matched inside words, and st ships no scrollbar at all. All four are
+	# applied with --forward so re-running the installer on an already-patched
+	# tree is a no-op rather than an error.
+	if [[ -d "${ASSET_DIR}/st-patches" ]]; then
+		local p applied=0
+		for p in scrollback mouse url scrollbar; do
+			local pf="${ASSET_DIR}/st-patches/${p}.diff"
+			[[ -f "${pf}" ]] || continue
+			if patch -p1 -s --forward -d "${src}" <"${pf}" 2>/dev/null; then
+				applied=$((applied + 1))
+			fi
+		done
+		# --forward leaves .rej/.orig files wherever a patch was already in
+		# place. They are noise in a source tree that is rebuilt from scratch,
+		# and a leftover .orig would be compiled into the next build.
+		find "${src}" -maxdepth 1 \( -name '*.rej' -o -name '*.orig' \) \
+			-delete 2>/dev/null || true
+		((applied > 0)) && ui_dim "st patches: ${applied}/4 applied"
 	fi
 
 	# Give st a real default window title: with opt_title == NULL the window
@@ -1193,15 +1320,28 @@ write_picom() {
 	install_user_file "${dir}/picom.conf" 644 <<'PICOM'
 # picom - Everforest
 #
-# Compositing (so ARGB windows such as the bar blend),
-# a soft shadow, and a dual-kawase blur limited to the power menu - its
-# translucent scrim then reads as frosted glass. Nothing else is blurred, so
-# the rest of the rice looks exactly as before.
+# Compositing (so ARGB windows such as the bar blend), a soft shadow, and a
+# dual-kawase blur limited to the power menu - its translucent scrim then reads
+# as frosted glass. Nothing else is blurred, so the rest of the rice looks
+# exactly as before.
 
+# glx, not xrender.
+#
+# xrender executes every composite on the CPU. It idles at ~0% because it does
+# almost nothing when the screen is still, but the moment anything moves -
+# scrolling a terminal, dragging a window, a page repainting - it saturates a
+# core and the desktop becomes visibly laggy. glx hands the same work to the
+# GPU: idle costs ~1.2% and real motion ~2%, with no stutter.
+#
+# An earlier version of this file switched to xrender on the strength of an
+# idle-only measurement. Idle numbers alone are misleading for a compositor;
+# the motion figure is the one that predicts how the desktop feels.
 backend = "glx";
 
 # Frosted glass for the full-screen power menu only.
 blur-background = true;
+# dual_kawase is the GPU-friendly method and is what makes blur affordable
+# here; it needs the glx backend.
 blur-method = "dual_kawase";
 blur-strength = 6;
 blur-background-frame = false;
@@ -1459,6 +1599,7 @@ dotfiles_install() {
 	# st is the default terminal; it is built from source on install.
 	write_st
 	write_st_desktop
+	write_default_terminal
 	write_rofi
 	write_dunst
 	write_picom

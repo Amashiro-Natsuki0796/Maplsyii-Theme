@@ -101,6 +101,22 @@ else
 	exit 1
 fi
 
+# ---- st patches (scrollback, wheel, Ctrl+click URLs) -----------------
+ST_PATCHES_SRC="${ST_PATCHES_SRC:-$ASSETS/st-patches}"
+if [[ -d "$ST_PATCHES_SRC" ]]; then
+	echo "    st patches: $ST_PATCHES_SRC"
+	for p in scrollback mouse url scrollbar; do
+		[[ -f "$ST_PATCHES_SRC/$p.diff" ]] || {
+			echo "!! missing st patch $p.diff"
+			exit 1
+		}
+	done
+	tar -C "$(dirname "$ST_PATCHES_SRC")" -cf - "$(basename "$ST_PATCHES_SRC")" | xz -T0 -9e >"$BUILD/payload/st-patches.tar.xz"
+else
+	echo "!! st patches not found at $ST_PATCHES_SRC"
+	exit 1
+fi
+
 # ---- assemble -------------------------------------------------------
 echo "==> assembling $OUT"
 {
@@ -119,7 +135,7 @@ chmod +x "$OUT.tmp"
 {
 	printf '\n\n# %s\n' "__I3_EVERFOREST_PAYLOAD_BELOW__"
 	printf '# Assets below are base64-encoded archives. Do not edit by hand.\n'
-	for a in icons.tar.xz gtk-theme.tar.xz wallpaper.jpg.xz user-avatar.jpg sddm-theme.tar.xz fonts.tar.xz bar.tar.xz bar-c.tar.xz; do
+	for a in icons.tar.xz gtk-theme.tar.xz wallpaper.jpg.xz user-avatar.jpg sddm-theme.tar.xz fonts.tar.xz bar.tar.xz bar-c.tar.xz st-patches.tar.xz; do
 		printf '\n@@asset %s.b64\n' "$a"
 		base64 -w 76 "$BUILD/payload/$a"
 		printf '@@end\n'

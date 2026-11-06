@@ -73,15 +73,20 @@ static void
 refresh_workspaces(Bar *b)
 {
 	char buf[8192];
-	FILE *f;
 
 	b->st.ws_count = 0;
-	f = popen("i3-msg -t get_workspaces 2>/dev/null", "r");
-	if (!f)
+
+	/* Read through the persistent IPC socket.
+	 *
+	 * This used to be popen("i3-msg -t get_workspaces"), which forked, exec'd,
+	 * reconnected and dumped JSON several times a second for a result that
+	 * usually had not changed. The socket is opened once and reused, so a
+	 * refresh is a write and a read. */
+	if (i3_get_workspaces(buf, sizeof buf) < 0) {
+		/* i3 restarted: drop the stale fd and try once more on the next
+		 * tick rather than hammering a dead socket. */
 		return;
-	size_t n = fread(buf, 1, sizeof buf - 1, f);
-	buf[n] = '\0';
-	pclose(f);
+	}
 
 	/* Walk the array one object at a time.
 	 *
@@ -192,6 +197,7 @@ refresh_cpu(Bar *b)
 	FILE *f = fopen("/proc/stat", "r");
 	unsigned long long v[8] = { 0 };
 	unsigned long long total = 0, idle;
+	unsigned long now = now_ms();
 	char line[256];
 
 	if (!f)
@@ -213,7 +219,33 @@ refresh_cpu(Bar *b)
 		if (pct > 100) pct = 100;
 		b->st.cpu_value = pct;
 		b->st.cpu_seq++;
-		b->st.cpu_last_ms = now_ms();
+		/* Stamp the true arrival time and measure the real interval.
+		 *
+		 * An earlier version advanced this clock by TICK_SYSINFO_MS on the
+		 * theory that a fixed step would keep the scroll phase continuous. It
+		 * did the opposite: samples are gated on the TICK_MS loop, so they
+		 * actually arrive every ~253ms, and the clock crept ~3ms per sample
+		 * ahead of wall time. "now - cpu_last_ms" then shrank until a sample
+		 * looked overdue, the guard rebased the clock, and the phase fell from
+		 * ~0.98 to ~0.04 - the whole strip jumping backwards by most of a step.
+		 * That was the lurch.
+		 *
+		 * The phase has to be divided by the interval the samples really
+		 * arrive at, not by a nominal constant, otherwise every interval ends
+		 * a few percent early and the residual is thrown away as a jump. The
+		 * measured gap is smoothed because it alternates between 7 and 8 ticks
+		 * (231 / 264ms) as the gate drifts across the loop's grid. */
+		if (b->st.cpu_last_ms) {
+			double gap = (double)(now - b->st.cpu_last_ms);
+
+			if (gap > TICK_SYSINFO_MS / 4.0 && gap < 4 * TICK_SYSINFO_MS) {
+				if (b->st.cpu_interval_ms <= 0)
+					b->st.cpu_interval_ms = gap;
+				else
+					b->st.cpu_interval_ms += (gap - b->st.cpu_interval_ms) * 0.25;
+			}
+		}
+		b->st.cpu_last_ms = now;
 
 		if (b->st.cpu_len == 0) {
 			/* First sample: pre-fill so the line spans the full width. */
@@ -254,30 +286,25 @@ bar_refresh(Bar *b)
 {
 	unsigned long t = now_ms();
 
-	/* After a click, poll quickly until i3 has caught up (ws_fast_until). */
-	{
-		unsigned long interval = (t < b->ws_fast_until) ? 25 : 60;
+	/* Workspaces are event-driven now: the main loop marks ws_dirty when i3
+	 * sends a workspace/window event, and this only re-reads the list at that
+	 * point. The old 60ms poll (a fork+exec per check) is gone.
+	 *
+	 * ws_fast_until is still honoured: right after a click i3 has not finished
+	 * applying the change yet, so the list is re-read a few times until the
+	 * focused flag matches what the click asked for. */
+	if (b->ws_dirty) {
+		refresh_workspaces(b);
 
-		if (t - b->last_ws >= interval) {
-			refresh_workspaces(b);
-			b->last_ws = t;
-			/* Repaint as soon as the focus actually moved. */
-			/* The set of workspaces rarely changes, but the focused flag
-			 * flips on every switch - that is what the pill follows. */
-			unsigned long sig = 0;
+		unsigned long sig = 0;
 
-			for (int i = 0; i < b->st.ws_count; i++) {
-				sig = sig * 31 + (unsigned long)b->st.ws[i].num;
-				sig = sig * 31 + (unsigned long)b->st.ws[i].focused;
-				sig = sig * 31 + (unsigned long)b->st.ws[i].urgent;
-			}
-			sig = sig * 31 + (unsigned long)b->st.ws_count;
-
-			if (sig != b->ws_sig) {
-				b->ws_sig = sig;
-				b->ws_dirty = 1;
-			}
+		for (int i = 0; i < b->st.ws_count; i++) {
+			sig = sig * 31 + (unsigned long)b->st.ws[i].num;
+			sig = sig * 31 + (unsigned long)b->st.ws[i].focused;
+			sig = sig * 31 + (unsigned long)b->st.ws[i].urgent;
 		}
+		sig = sig * 31 + (unsigned long)b->st.ws_count;
+		b->ws_sig = sig;
 	}
 	if (t - b->last_clock >= TICK_CLOCK_MS) {
 		refresh_clock(b);
@@ -291,6 +318,31 @@ bar_refresh(Bar *b)
 	if (t - b->last_network >= TICK_NETWORK_MS) {
 		refresh_network(b);
 		b->last_network = t;
+	}
+
+	/* Scroll phase for the CPU graph.
+	 *
+	 * The line slides left by the fraction of a sample interval that has
+	 * elapsed, so this is the same fraction the samples are arriving at:
+	 * dividing by the nominal 250ms while they really arrive every ~253ms made
+	 * the phase reach 1.0 before the sample did, and wrapping it there jumped
+	 * the strip backwards. Divide by the measured interval instead.
+	 *
+	 * cpu_last_ms is stamped inside refresh_cpu(), a moment after t was taken,
+	 * so a fresh sample can put it slightly in the future; subtracting two
+	 * unsigned longs there wraps to ~1.8e19 (it showed up as frac=7.3e16).
+	 * Compare before subtracting. */
+	if (b->st.cpu_last_ms) {
+		double iv = b->st.cpu_interval_ms > 0 ? b->st.cpu_interval_ms
+		                                      : TICK_SYSINFO_MS;
+		double ph = (b->st.cpu_last_ms >= t)
+		                ? 0.0
+		                : (double)(t - b->st.cpu_last_ms) / iv;
+
+		if (ph > 1) ph = 1;
+		b->st.cpu_frac = ph;
+	} else {
+		b->st.cpu_frac = 0.0;
 	}
 }
 
@@ -609,10 +661,28 @@ bar_update_hover(Bar *b)
 	}
 
 	if (was != b->hover_region) {
-		/* Full redraw on hover change: it happens once per pointer move
-		 * between controls, so the cost is irrelevant and the result is always
-		 * consistent with the freshly assigned rectangle. */
-		bar_draw(b);
+		/* Repaint only the two pills involved, not the whole bar.
+		 *
+		 * This used to call bar_draw(). A full redraw re-runs every module -
+		 * including the centre window title, which is re-measured and
+		 * re-clipped on each pass - and the panel is an ARGB window, so the
+		 * whole strip was being recomposited on every pointer move between
+		 * controls. That is what made the title blink as the pointer crossed
+		 * the bar, and it was a needless full-width repaint at that.
+		 *
+		 * Restoring the old pill and tinting the new one touches two small
+		 * rectangles instead. The baseline holds the bar as it was drawn
+		 * without any veil, so the old highlight is erased exactly. */
+		if (was >= 0 && was < b->region_count) {
+			HitRegion *o = &b->regions[was];
+
+			bar_draw_region_only(b, o->x, o->y, o->w, o->h);
+		}
+		if (b->hover_region >= 0 && b->hover_region < b->region_count) {
+			HitRegion *r = &b->regions[b->hover_region];
+
+			bar_draw_region_only(b, r->x, r->y, r->w, r->h);
+		}
 	}
 }
 
@@ -891,18 +961,45 @@ main(void)
 	unsigned long last_tick = 0;
 
 	bar_init(&b);
+	/* Fill the workspace list before the first paint.
+	 *
+	 * bar_refresh() only re-reads i3 when ws_dirty is set, and that flag
+	 * starts at 0. Without this the first frame drew an empty pill row and
+	 * the workspaces only appeared after the first i3 event - which on an
+	 * idle desktop could be minutes away. */
+	b.ws_dirty = 1;
+	bar_refresh(&b);
+	b.ws_dirty = 0;
 	bar_draw(&b);
 	signal(SIGHUP, on_reload);
 	XSetErrorHandler(on_x_error);
 	xfd = ConnectionNumber(b.dpy);
 
+	/* Subscribe to i3's events so the workspace pills follow a switch the
+	 * instant it happens, without polling for it.
+	 *
+	 * Before this the bar asked i3 for the workspace list every 60ms. On an
+	 * idle desktop that fork+exec was the bar's dominant cost, and because the
+	 * bar is a translucent ARGB window, every resulting repaint also made
+	 * picom composite it again (measured: picom woke ~313x/s).
+	 *
+	 * i3 pushes a message whenever the workspace or window set changes, so the
+	 * bar can sleep until either X or i3 has something to say. */
+	i3_subscribe();
+
 	for (;;) {
 		fd_set fds;
-		struct timeval tv = { 0, TICK_MS * 1000 };
+		/* Wake for the graph's own cadence, not for every possible event.
+		 * GRAPH_TICK_MS governs how often the CPU line is redrawn; an X or
+		 * i3 event wakes the loop sooner when something actually happened. */
+		struct timeval tv = { 0, GRAPH_TICK_MS * 1000 };
 		int rc;
+		int ifd = i3_fd_get();
 
 		FD_ZERO(&fds);
 		FD_SET(xfd, &fds);
+		if (ifd >= 0)
+			FD_SET(ifd, &fds);
 
 		/* While a workspace change is expected, wake up much sooner so the
 		 * highlight can follow within a frame or two. */
@@ -911,7 +1008,16 @@ main(void)
 			tv.tv_usec = 8 * 1000;   /* 8ms */
 		}
 
-		rc = select(xfd + 1, &fds, NULL, NULL, &tv);
+		rc = select((ifd > xfd ? ifd : xfd) + 1, &fds, NULL, NULL, &tv);
+
+		/* An i3 event means the workspace or window set changed. Drain it and
+		 * re-read the list once - not on a timer, but when it is needed. */
+		if (rc > 0 && ifd >= 0 && FD_ISSET(ifd, &fds)) {
+			while (i3_pending())
+				i3_read_event();
+			b.ws_dirty = 1;
+		}
+
 		if (rc > 0 && FD_ISSET(xfd, &fds)) {
 			while (XPending(b.dpy)) {
 				XEvent ev;
@@ -962,48 +1068,52 @@ main(void)
 			bar_draw(&b);
 		}
 
-		/* Redraw at most twice a second, and only if the clock text or the
-		 * graph actually moved. A full redraw forks several helpers and pushes
-		 * a new image to X, which delays anything i3 is doing at that moment. */
+		/* One pass over the cheap state, then repaint only what changed.
+		 *
+		 * The loop itself no longer runs at a fixed 30Hz: select() waits for
+		 * an X or i3 event and otherwise sleeps for GRAPH_TICK_MS. On an idle
+		 * desktop that means it wakes 15 times a second instead of 30, and
+		 * every one of those wakes used to cost a fork (i3-msg).
+		 *
+		 * Three independent reasons to repaint, checked in order:
+		 *   ws_dirty    i3 said the workspace/window set changed
+		 *   pressed     a click is still animating its feedback
+		 *   graph       15Hz: the CPU line, the only continuously moving part
+		 */
 		unsigned long t = now_ms();
-		if (t - last_tick >= (now_ms() < b.ws_fast_until ? 8 : TICK_MS)) {
+		if (t - last_tick >= (now_ms() < b.ws_fast_until ? 8 : GRAPH_TICK_MS)) {
 			unsigned long prev_seq = b.st.cpu_seq;
-			int prev_cpu = b.st.cpu_value;
 			char prev_clock[16];
+			int ws_changed;
 
 			last_tick = t;
 			memcpy(prev_clock, b.st.clock, sizeof prev_clock);
+
+			/* Pick up the pending workspace change before bar_refresh() gets
+			 * a chance to clear it, so this frame can repaint the pills. */
+			ws_changed = b.ws_dirty;
 
 			/* Cheap state only: the graph needs a new sample, the clock a new
 			 * minute. The costly parts (i3 tree, memory) run on their own
 			 * timers inside bar_refresh. */
 			bar_refresh(&b);
-			(void)prev_clock;
+			(void)prev_seq;
 
-			/* The graph scrolls continuously, so repaint whenever the bar is
-			 * visible. Text modules are cheap to redraw compared with the
-			 * smoothness this buys. */
-			/* Scroll phase.
-			 *
-			 * Clamping at 1.0 made the line crawl, stall at the end of the
-			 * interval, then jump when the next sample landed - the visible
-			 * stutter. Wrap the phase instead: it keeps advancing at a
-			 * constant rate forever, and the wrap coincides exactly with the
-			 * sample being appended, so the shift and the array slide cancel
-			 * out and motion stays even. */
-			if (b.st.cpu_last_ms) {
-				double ph = (double)(t - b.st.cpu_last_ms) /
-				            TICK_SYSINFO_MS;
+			/* The clock changes once a minute and nothing else in the text
+			 * band does, so compare it rather than repainting on a timer. */
+			if (memcmp(prev_clock, b.st.clock, sizeof prev_clock) != 0)
+				ws_changed = 1;
 
-				b.st.cpu_frac = ph - (long)ph;
-				if (ph < 0)
-					b.st.cpu_frac = 0.0;
+			if (ws_changed) {
+				b.ws_dirty = 0;
+				bar_draw(&b);
+			} else if (b.pressed_region >= 0) {
+				/* Restore the pill from the baseline and re-tint it. */
+				bar_draw_region_only(&b, b.fb_x, b.fb_y, b.fb_w, b.fb_h);
 			} else {
-				b.st.cpu_frac = 0.0;
+				/* The CPU graph, at the display cadence. */
+				bar_draw_graph_only(&b);
 			}
-
-
-			(void)prev_seq; (void)prev_cpu;
 
 			/* Repaint first, then re-derive the hover.
 			 *
@@ -1011,21 +1121,6 @@ main(void)
 			 * before it meant hit-testing against the previous frame's
 			 * rectangles - after a workspace switch those are shifted, so the
 			 * pill under the pointer was reported as its neighbour. */
-			if (b.ws_dirty) {
-				/* The workspace set changed: the pills must be repainted. */
-				b.ws_dirty = 0;
-				bar_draw(&b);
-			} else if (b.pressed_region >= 0) {
-				/* Restore the pill from the baseline and re-tint it. */
-				bar_draw_region_only(&b, b.fb_x, b.fb_y, b.fb_w, b.fb_h);
-			} else {
-				/* Fast path: only the graph moves. */
-				bar_draw_graph_only(&b);
-			}
-
-			/* Always re-derive the hover, even when nothing is hovered: this is
-			 * what dismisses a tooltip whose control the pointer has left (for
-			 * example onto a rofi menu). */
 			bar_update_hover(&b);
 
 

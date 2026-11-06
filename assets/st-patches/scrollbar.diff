@@ -1,0 +1,537 @@
+--- a/st.c
++++ b/st.c
+@@ -121,6 +121,7 @@
+ 	Line *alt;    /* alternate screen */
+ 	Line hist[HISTSIZE]; /* history buffer */
+ 	int histi;    /* history index */
++	int histlen;  /* lines pushed so far, saturating at HISTSIZE */
+ 	int scr;      /* scroll back */
+ 	int *dirty;   /* dirtyness of lines */
+ 	TCursor c;    /* cursor */
+@@ -838,6 +839,83 @@
+ 	}
+ }
+ 
++/* ---- scrollbar geometry -----------------------------------------------
++ *
++ * The thumb is proportional: it occupies (rows / (rows + history)) of the
++ * track, so a long buffer gives a short thumb and the size tells you how much
++ * output has scrolled past. Its position is term.scr / (rows + history), where
++ * term.scr == 0 is the live bottom.
++ *
++ * "history" is limited to what has actually been filled. histi counts the
++ * lines that have been pushed into the ring, and until it wraps that is the
++ * only history that exists - using HISTSIZE from the start would make the
++ * thumb tiny at startup and grow as the buffer filled, which looks like the
++ * bar is settling rather than like data.
++ */
++static int
++histdepth(void)
++{
++	return term.histlen;
++}
++
++int
++trows(void)
++{
++	return term.row;
++}
++
++int
++tscroll_depth(void)
++{
++	return histdepth();
++}
++
++int
++tscrollfrac(double *frac, double *size)
++{
++	int depth = histdepth();
++	int total = term.row + depth;
++
++	if (total <= 0)
++		return 0;
++
++	/* Clamp: term.scr can exceed the real depth for a moment after a resize
++	 * shrinks the window. */
++	if (term.scr > depth)
++		term.scr = depth;
++
++	*frac = (double)term.scr / (double)total;
++	*size = (double)term.row / (double)total;
++	return 1;
++}
++
++/* Jump so the top of the visible area is at history line `target`
++ * (0 = live bottom, depth = oldest line). */
++void
++tscrollto(int target)
++{
++	int depth = histdepth();
++	int want;
++	Arg a;
++
++	if (target < 0)
++		target = 0;
++	if (target > depth)
++		target = depth;
++
++	want = target - term.scr;
++	if (want == 0)
++		return;
++
++	a.i = want;
++	if (want > 0)
++		kscrollup(&a);
++	else {
++		a.i = -want;
++		kscrolldown(&a);
++	}
++}
++
+ void
+ selclear(void)
+ {
+@@ -1330,6 +1408,8 @@
+ 
+ 	if (copyhist) {
+ 		term.histi = (term.histi + 1) % HISTSIZE;
++		if (term.histlen < HISTSIZE)
++			term.histlen++;
+ 		temp = term.hist[term.histi];
+ 		term.hist[term.histi] = term.line[orig];
+ 		term.line[orig] = temp;
+--- a/st.h
++++ b/st.h
+@@ -86,6 +86,10 @@
+ void kscrollup(const Arg *);
+ void seturltag(int);
+ void followurl(int, int);
++int tscrollfrac(double *frac, double *size);
++void tscrollto(int);
++int tscroll_depth(void);
++int trows(void);
+ void printscreen(const Arg *);
+ void printsel(const Arg *);
+ void sendbreak(const Arg *);
+--- a/config.def.h
++++ b/config.def.h
+@@ -485,3 +485,26 @@
+ char *urlprefixes[] = {
+ 	"http://", "https://", "ftp://", "file://", "mailto:", NULL
+ };
++
++/*
++ * Scrollbar on the right edge.
++ *
++ * st has no scrollbar of its own; the scrollback buffer was invisible, so
++ * there was no way to tell how far back a window was scrolled or how much
++ * history was left. The bar is drawn by xdrawscrollbar() after the text and
++ * it tracks term.scr, which the wheel and Shift+PageUp/PageDown move.
++ *
++ *   scrollbar         0 = off, 1 = on
++ *   scrollbar_width   pixels, at the right edge of the window
++ *   scrollbar_fg      palette index the thumb colour is taken from
++ *   scrollbar_alpha   thumb opacity, 0..1. The window is already translucent
++ *                     (ST_ALPHA), so a fully opaque thumb would read as a
++ *                     black stripe pasted over the wallpaper. Keeping it well
++ *                     under 1.0 blends it onto the glass the same way the text
++ *                     sits on it. 0.30 is visible on any wallpaper without
++ *                     covering what is behind it.
++ */
++static int scrollbar = 1;
++static int scrollbar_width = 10;
++static unsigned int scrollbar_fg = 8;    /* thumb: bright black */
++static double scrollbar_alpha = 0.42;
+--- a/x.c
++++ b/x.c
+@@ -102,6 +102,7 @@
+ 	} ime;
+ 	Draw draw;
+ 	Visual *vis;
++	int depth;
+ 	XSetWindowAttributes attrs;
+ 	int scr;
+ 	int isfixed; /* is fixed geometry? */
+@@ -145,6 +146,9 @@
+ static void xdrawglyphfontspecs(const XftGlyphFontSpec *, Glyph, int, int, int);
+ static void xdrawglyph(Glyph, int, int);
+ static void xclear(int, int, int, int);
++static void xdrawscrollbar(void);
++static int  scrollbarhit(int, int);
++static void scrollbar_track(int);
+ static int xgeommasktogravity(int);
+ static int ximopen(Display *);
+ static void ximinstantiate(Display *, XPointer, XPointer);
+@@ -251,9 +255,10 @@
+ static char *opt_io    = NULL;
+ static char *opt_line  = NULL;
+ static char *opt_name  = NULL;
+-static char *opt_title = NULL;
++static char *opt_title = "Simple Terminal";
+ 
+ static uint buttons; /* bit field of pressed buttons */
++static int sbdrag;   /* dragging the scrollbar thumb */
+ 
+ void
+ clipcopy(const Arg *dummy)
+@@ -485,6 +490,15 @@
+ 	if (1 <= btn && btn <= 11)
+ 		buttons |= 1 << (btn-1);
+ 
++	/* The scrollbar is our chrome, not the application's input: take its
++	 * clicks before mouse reporting, or a program that grabbed the mouse
++	 * (less, vim) would swallow them. */
++	if (btn == Button1 && scrollbarhit(e->xbutton.x, e->xbutton.y)) {
++		sbdrag = 1;
++		scrollbar_track(e->xbutton.y);
++		return;
++	}
++
+ 	if (IS_SET(MODE_MOUSE) && !(e->xbutton.state & forcemousemod)) {
+ 		mousereport(e);
+ 		return;
+@@ -712,6 +726,11 @@
+ 	if (1 <= btn && btn <= 11)
+ 		buttons &= ~(1 << (btn-1));
+ 
++	if (sbdrag) {
++		sbdrag = 0;
++		return;
++	}
++
+ 	if (IS_SET(MODE_MOUSE) && !(e->xbutton.state & forcemousemod)) {
+ 		mousereport(e);
+ 		return;
+@@ -726,6 +745,14 @@
+ void
+ bmotion(XEvent *e)
+ {
++	/* Dragging the scrollbar: follow the pointer. ButtonMotionMask already
++	 * gives us motion events while Button1 is held, so no extra selection is
++	 * needed for this. */
++	if (sbdrag) {
++		scrollbar_track(e->xbutton.y);
++		return;
++	}
++
+ 	if (IS_SET(MODE_MOUSE) && !(e->xbutton.state & forcemousemod)) {
+ 		mousereport(e);
+ 		return;
+@@ -762,7 +789,7 @@
+ 
+ 	XFreePixmap(xw.dpy, xw.buf);
+ 	xw.buf = XCreatePixmap(xw.dpy, xw.win, win.w, win.h,
+-			DefaultDepth(xw.dpy, xw.scr));
++			xw.depth);
+ 	XftDrawChange(xw.draw, xw.buf);
+ 	xclear(0, 0, win.w, win.h);
+ 
+@@ -822,6 +849,11 @@
+ 			else
+ 				die("could not allocate color %d\n", i);
+ 		}
++	if (xw.depth == 32) {
++		unsigned short a = (unsigned short)(65535.0 *
++			((getenv("ST_ALPHA") ? atoi(getenv("ST_ALPHA")) : 78) / 100.0));
++		dc.col[defaultbg].color.alpha = a;
++	}
+ 	loaded = 1;
+ }
+ 
+@@ -1148,7 +1180,17 @@
+ 	if (!(xw.dpy = XOpenDisplay(NULL)))
+ 		die("can't open display\n");
+ 	xw.scr = XDefaultScreen(xw.dpy);
+-	xw.vis = XDefaultVisual(xw.dpy, xw.scr);
++	/* Prefer an ARGB visual so a translucent background is possible. */
++	{
++		XVisualInfo vi;
++		if (XMatchVisualInfo(xw.dpy, xw.scr, 32, TrueColor, &vi)) {
++			xw.vis = vi.visual;
++			xw.depth = 32;
++		} else {
++			xw.vis = XDefaultVisual(xw.dpy, xw.scr);
++			xw.depth = XDefaultDepth(xw.dpy, xw.scr);
++		}
++	}
+ 
+ 	/* font */
+ 	if (!FcInit())
+@@ -1158,7 +1200,10 @@
+ 	xloadfonts(usedfont, 0);
+ 
+ 	/* colors */
+-	xw.cmap = XDefaultColormap(xw.dpy, xw.scr);
++	xw.cmap = (xw.depth == 32)
++		? XCreateColormap(xw.dpy, XRootWindow(xw.dpy, xw.scr),
++			xw.vis, AllocNone)
++		: XDefaultColormap(xw.dpy, xw.scr);
+ 	xloadcols();
+ 
+ 	/* adjust fixed window geometry */
+@@ -1170,7 +1215,8 @@
+ 		xw.t += DisplayHeight(xw.dpy, xw.scr) - win.h - 2;
+ 
+ 	/* Events */
+-	xw.attrs.background_pixel = dc.col[defaultbg].pixel;
++	xw.attrs.background_pixel = (xw.depth == 32)
++		? 0 : dc.col[defaultbg].pixel;
+ 	xw.attrs.border_pixel = dc.col[defaultbg].pixel;
+ 	xw.attrs.bit_gravity = NorthWestGravity;
+ 	xw.attrs.event_mask = FocusChangeMask | KeyPressMask | KeyReleaseMask
+@@ -1181,16 +1227,16 @@
+ 	if (!(opt_embed && (parent = strtol(opt_embed, NULL, 0))))
+ 		parent = XRootWindow(xw.dpy, xw.scr);
+ 	xw.win = XCreateWindow(xw.dpy, parent, xw.l, xw.t,
+-			win.w, win.h, 0, XDefaultDepth(xw.dpy, xw.scr), InputOutput,
++			win.w, win.h, 0, xw.depth, InputOutput,
+ 			xw.vis, CWBackPixel | CWBorderPixel | CWBitGravity
+ 			| CWEventMask | CWColormap, &xw.attrs);
+ 
+ 	memset(&gcvalues, 0, sizeof(gcvalues));
+ 	gcvalues.graphics_exposures = False;
+-	dc.gc = XCreateGC(xw.dpy, parent, GCGraphicsExposures,
++	dc.gc = XCreateGC(xw.dpy, xw.win, GCGraphicsExposures,
+ 			&gcvalues);
+ 	xw.buf = XCreatePixmap(xw.dpy, xw.win, win.w, win.h,
+-			DefaultDepth(xw.dpy, xw.scr));
++			xw.depth);
+ 	XSetForeground(xw.dpy, dc.gc, dc.col[defaultbg].pixel);
+ 	XFillRectangle(xw.dpy, xw.buf, dc.gc, 0, 0, win.w, win.h);
+ 
+@@ -1412,7 +1458,8 @@
+ 	}
+ 
+ 	if (IS_TRUECOL(base.bg)) {
+-		colbg.alpha = 0xffff;
++		colbg.alpha = (unsigned short)(65535.0 *
++			((getenv("ST_ALPHA") ? atoi(getenv("ST_ALPHA")) : 78) / 100.0));
+ 		colbg.green = TRUEGREEN(base.bg);
+ 		colbg.red = TRUERED(base.bg);
+ 		colbg.blue = TRUEBLUE(base.bg);
+@@ -1693,9 +1740,190 @@
+ 		xdrawglyphfontspecs(specs, base, i, ox, y1);
+ }
+ 
++/* Draw the scrollback scrollbar on the right edge.
++ *
++ * Called from draw() after the text, so it sits on top of any cell that
++ * reaches the edge. Only drawn when there is history to show: a terminal that
++ * has never scrolled does not need a thumb that is the whole track.
++ *
++ * Two things make it feel like part of the terminal rather than a black stripe
++ * pasted on:
++ *
++ *   - nothing opaque is ever painted. Xft only offers rectangles, and a solid
++ *     rectangle in the background colour reads as a black bar even though the
++ *     rest of the window is 60% transparent. Both the track and the thumb are
++ *     alpha-blended onto whatever is already in the back buffer, so the
++ *     wallpaper keeps showing through exactly as it does behind the text.
++ *   - the caps are round. st has no drawing primitives beyond rectangles, so
++ *     each cap is a stack of one-pixel rows whose inset follows a circle.
++ *
++ * The track is deliberately *not* filled: the scrollbar sits over the text
++ * margin, so a track tint would just darken the right edge for no reason. The
++ * thumb alone carries the affordance, which is also how the scrollbars in
++ * most editors behave when idle. */
++static void
++xdrawscrollbar(void)
++{
++	double frac, size, track, thumb, top;
++	int x0, w0;
++	XRenderColor rc;
++	static XftColor thumbcol;   /* kept: allocated once, reused every frame */
++	static int alloced;
++
++	if (!scrollbar || scrollbar_width <= 0)
++		return;
++	if (!tscrollfrac(&frac, &size))
++		return;
++	/* Nothing scrolled past yet: no bar at all. */
++	if (size >= 0.999)
++		return;
++
++	w0 = scrollbar_width;
++	x0 = win.w - w0;
++	if (x0 < borderpx)
++		return;
++
++	track = win.h;
++	thumb = size * track;
++	if (thumb < 12)
++		thumb = 12;              /* stay grabbable */
++	if (thumb > track)
++		thumb = track;
++
++	/* frac == 0 is the live bottom, so the thumb hangs off the end. */
++	top = (1.0 - frac) * track - thumb;
++	if (top < 0)
++		top = 0;
++	if (top + thumb > track)
++		top = track - thumb;
++
++	/* The thumb colour, with an alpha that leaves the wallpaper visible.
++	 *
++	 * Allocated once and reused: XftColorAllocValue is a round trip to the
++	 * server and this runs on every frame. The pixels come from the palette so
++	 * the bar matches the theme, but the alpha is ours - palette entries are
++	 * fully opaque, and an opaque thumb is exactly the black stripe to avoid.
++	 */
++	if (!alloced) {
++		XColor pc;
++
++		/* Resolve the configured palette entry to actual RGB, then re-add it
++		 * with our own alpha. */
++		if (!XParseColor(xw.dpy, xw.cmap,
++		                 colorname[scrollbar_fg] ? colorname[scrollbar_fg]
++		                                         : "#7a8478", &pc))
++			pc.red = pc.green = pc.blue = 0x8888;
++		/* A 32-bit X pixmap is *premultiplied* ARGB, so a translucent colour
++		 * has to have its channels scaled by alpha before it is drawn.
++		 * XRenderFillRectangle (what XftDrawRect uses) writes the colour
++		 * straight into the destination rather than compositing it, so an
++		 * un-premultiplied colour shows up as a solid, fully opaque bar - and
++		 * one that is far too bright, because its channels were never scaled.
++		 * That is why the thumb first rendered as flat #7a8478. */
++		rc.alpha = (unsigned short)(65535.0 * scrollbar_alpha);
++		rc.red = (unsigned short)(pc.red * scrollbar_alpha);
++		rc.green = (unsigned short)(pc.green * scrollbar_alpha);
++		rc.blue = (unsigned short)(pc.blue * scrollbar_alpha);
++		if (!XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &rc, &thumbcol)) {
++			/* Fall back to the palette entry as-is; a visible bar is better
++			 * than none. */
++			thumbcol = dc.col[scrollbar_fg];
++		}
++		alloced = 1;
++	}
++
++	/* Thumb: a rounded bar, both ends capped. */
++	{
++		int tx = x0 + 1;             /* inset from the window edge */
++		int tw = w0 - 2;             /* visible thumb width */
++		int ty = (int)top + 1;
++		int th = (int)thumb - 2;
++		int r = tw / 2;              /* a true pill cap */
++
++		if (th < 2)
++			th = 2;
++		if (r > th / 2)
++			r = th / 2;              /* short thumb: caps meet in the middle */
++
++		if (r <= 0) {
++			XftDrawRect(xw.draw, &thumbcol, tx, ty, tw, th);
++		} else {
++			int i;
++
++			/* Straight sides between the two caps. */
++			XftDrawRect(xw.draw, &thumbcol, tx,
++			            ty + r, tw, th - 2 * r);
++
++			for (i = 0; i < r; i++) {
++				/* dy from the cap's centre, in pixels; the 0.5 puts the
++				 * curve on pixel centres rather than edges. */
++				double dy = (double)(r - i) - 0.5;
++				double inset = r - sqrt(r * r - dy * dy);
++				int dx = (int)(inset + 0.5);
++
++				if (tw - 2 * dx <= 0)
++					continue;
++				XftDrawRect(xw.draw, &thumbcol, tx + dx,
++				            ty + i, tw - 2 * dx, 1);
++				XftDrawRect(xw.draw, &thumbcol, tx + dx,
++				            ty + th - 1 - i, tw - 2 * dx, 1);
++			}
++		}
++	}
++}
++
++/* Scroll so the thumb lands under the pointer.
++ *
++ * The track maps linearly onto the whole buffer: the top of the window is the
++ * oldest line, the bottom is the live output. So the row under the pointer,
++ * as a fraction of the window height, is directly the fraction of history to
++ * scroll to - no need to model the thumb's own size here, which keeps a drag
++ * from feeling "sticky" when the thumb is long.
++ *
++ * Used for the press as well as the motion, so clicking the track jumps and
++ * dragging follows continuously. */
++static void
++scrollbar_track(int y)
++{
++	int depth = tscroll_depth();
++	double pos;
++
++	if (win.h <= 0)
++		return;
++
++	/* y == win.h is the live bottom (fully scrolled down). */
++	pos = 1.0 - (double)y / (double)win.h;
++	if (pos < 0.0) pos = 0.0;
++	if (pos > 1.0) pos = 1.0;
++
++	tscrollto((int)(pos * depth + 0.5));
++}
++
++/* Is (px, py) inside the scrollbar strip? Window coordinates. */
++static int
++scrollbarhit(int px, int py)
++{
++	(void)py;
++	if (!scrollbar || scrollbar_width <= 0)
++		return 0;
++	if (win.w - px > scrollbar_width)
++		return 0;
++	/* Only when there is something to scroll. */
++	{
++		double frac, size;
++
++		if (!tscrollfrac(&frac, &size))
++			return 0;
++		if (size >= 0.999)
++			return 0;
++	}
++	return 1;
++}
++
+ void
+ xfinishdraw(void)
+ {
++	xdrawscrollbar();
+ 	XCopyArea(xw.dpy, xw.buf, xw.win, dc.gc, 0, 0, win.w,
+ 			win.h, 0, 0);
+ 	XSetForeground(xw.dpy, dc.gc,
+@@ -1880,13 +2108,27 @@
+ 	 * KeyRelease must also be routed here for that to work - see the handler
+ 	 * table - so releases are dropped before the shortcut table below, which
+ 	 * would otherwise act on shortcuts twice. */
+-	if (ksym == XK_Control_L || ksym == XK_Control_R) {
+-		if (ev->type == KeyPress) {
+-			seturltag(1);
+-			return;             /* Ctrl alone has nothing to send */
++	/* The test cannot be on ksym alone: XmbLookupString()/XLookupString()
++	 * return NoSymbol for every release, because "Ctrl released" has no
++	 * keysym - only the keycode identifies it. Testing ksym matched the press
++	 * but never the release, so the underline appeared and then stayed on
++	 * until the next Ctrl press happened to replace it. Compare the keycode on
++	 * the way up, which is what a release actually carries. */
++	{
++		int isctrl;
++
++		if (ev->type == KeyRelease) {
++			KeyCode kc = XKeysymToKeycode(xw.dpy, XK_Control_L);
++
++			isctrl = (e->keycode == kc) ||
++			         (e->keycode == XKeysymToKeycode(xw.dpy, XK_Control_R));
++		} else {
++			isctrl = (ksym == XK_Control_L || ksym == XK_Control_R);
++		}
++		if (isctrl) {
++			seturltag(ev->type == KeyPress ? 1 : 0);
++			return;
+ 		}
+-		seturltag(0);
+-		return;
+ 	}
+ 	if (ev->type == KeyRelease)
+ 		return;

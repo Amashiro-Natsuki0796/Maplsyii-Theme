@@ -1,0 +1,324 @@
+--- a/st.c
++++ b/st.c
+@@ -643,6 +643,201 @@
+ 	return str;
+ }
+ 
++/* ---- URLs: Ctrl+click opens the link under the pointer -------------------
++ *
++ * st has no URL support and the upstream clickurl patch targets 0.8.5, so
++ * this is written against 0.9.2. One scanner feeds both the highlighter and
++ * the click handler, so exactly what gets underlined is exactly what opens.
++ *
++ * Two things the upstream patch gets wrong and are handled here:
++ *   - a line with no match left its cursor at -1, so the next search started
++ *     at column 0 and wrapped around, matching in the middle of a word;
++ *   - a link wider than the window is split by the wrap and only the piece on
++ *     one line was underlined and opened. Terminals wrap at 80 columns, so
++ *     that is the common case for real URLs. The scanner here follows
++ *     ATTR_WRAP from the end of one line onto the next.
++ */
++
++/* Cell positions of one link, so it can be marked and turned into text. */
++struct urlcell { int row, col; };
++
++/* Characters allowed inside a link. Quotes and brackets are excluded so that
++ * <https://example.com> and "https://example.com" both work. */
++static int
++isurlchar(Rune u)
++{
++	if (u <= 0x20 || u >= 0x7f)
++		return 0;
++	return strchr("<>\"`\\{}|^[]", (int)u) == NULL;
++}
++
++static int
++linewrapped(int row)
++{
++	return row >= 0 && row < term.row &&
++	       (TLINE(row)[term.col - 1].mode & ATTR_WRAP);
++}
++
++/* Collect the link that starts at (row, col), following the wrap onto the
++ * following lines. Returns the number of cells, or 0 when it is not a link.
++ *
++ * Trailing sentence punctuation is trimmed first: "see https://x.org." must
++ * open https://x.org and not the full stop. */
++static int
++collecturl(int row, int col, struct urlcell *out, int max)
++{
++	int n = 0, r = row, c = col;
++
++	for (;;) {
++		if (c >= term.col) {
++			if (!linewrapped(r) || r + 1 >= term.row)
++				break;
++			r++;
++			c = 0;
++		}
++		if (!isurlchar(TLINE(r)[c].u))
++			break;
++		if (n >= max)
++			break;
++		out[n].row = r;
++		out[n].col = c;
++		n++;
++		c++;
++	}
++
++	while (n > 0 && strchr(".,;:!?)'", (int)TLINE(out[n - 1].row)[out[n - 1].col].u))
++		n--;
++	return n;
++}
++
++/* Does a link start exactly here? The match has to begin at a word edge and
++ * must carry something after the scheme's "//", so a bare "https://" is not
++ * treated as a link. */
++static int
++isurlstart(int row, int col, struct urlcell *cells, int max)
++{
++	int p, n, k, host;
++
++	if (col > 0 && isurlchar(TLINE(row)[col - 1].u))
++		return 0;
++
++	for (p = 0; urlprefixes[p]; p++) {
++		n = strlen(urlprefixes[p]);
++		if (col + n > term.col)
++			continue;
++		for (k = 0; k < n; k++) {
++			if (TLINE(row)[col + k].u != (Rune)(unsigned char)urlprefixes[p][k])
++				break;
++		}
++		if (k == n)
++			break;
++	}
++	if (!urlprefixes[p])
++		return 0;
++
++	host = collecturl(row, col, cells, max);
++	if (host <= n)              /* nothing past "https://" */
++		return 0;
++	return host;
++}
++
++/* Underline every link on screen, or clear the marks again. */
++void
++seturltag(int on)
++{
++	struct urlcell cells[512];
++	int r, c;
++
++	/* Clear first: the tag must never survive a line becoming something
++	 * else, and the old mark would otherwise keep the underline alive. */
++	for (r = 0; r < term.row; r++) {
++		for (c = 0; c < term.col; c++) {
++			if (TLINE(r)[c].mode & ATTR_URL)
++				TLINE(r)[c].mode &= ~ATTR_URL;
++		}
++	}
++
++	if (on) {
++		for (r = 0; r < term.row; r++) {
++			for (c = 0; c < term.col; c++) {
++				int n = isurlstart(r, c, cells, LEN(cells));
++
++				if (!n)
++					continue;
++				for (int i = 0; i < n; i++)
++					TLINE(cells[i].row)[cells[i].col].mode |= ATTR_URL;
++				c = cells[n - 1].col;   /* continue after the link */
++				if (cells[n - 1].row != r)
++					break;              /* next rows are marked too */
++			}
++		}
++	}
++	tfulldirt();
++}
++
++/* Open the link that covers screen cell (row, col) with the configured
++ * handler. */
++void
++followurl(int row, int col)
++{
++	struct urlcell cells[512];
++	char url[4096];
++	int n = 0, r, c, srow;
++	pid_t child;
++
++	/* A link may have wrapped onto this row, so the search has to begin at
++	 * the first row of the wrapped paragraph, not at the row clicked. */
++	srow = row;
++	while (srow > 0 && linewrapped(srow - 1) && row - srow < 64)
++		srow--;
++
++	for (r = srow; r <= row; r++) {
++		for (c = 0; c < term.col; c++) {
++			int ncell = isurlstart(r, c, cells, LEN(cells));
++			int hit = 0;
++
++			if (!ncell)
++				continue;
++			for (int i = 0; i < ncell; i++) {
++				if (cells[i].row == row && cells[i].col == col) {
++					hit = 1;
++					break;
++				}
++			}
++			if (!hit) {
++				c = cells[ncell - 1].row == r ? cells[ncell - 1].col : c;
++				continue;
++			}
++			for (int i = 0; i < ncell && n < (int)sizeof(url) - 1; i++)
++				n += utf8encode(TLINE(cells[i].row)[cells[i].col].u,
++				                url + n);
++			url[n] = '\0';
++			goto found;
++		}
++	}
++	return;
++
++found:
++	/* Double fork: st reaps its child through sigchld(), which exits the
++	 * terminal when the child dies, so the browser must not stay a child.
++	 * The intermediate process is reaped here; the browser is orphaned. */
++	if ((child = fork()) == 0) {
++		if (fork() == 0) {
++			signal(SIGCHLD, SIG_DFL);
++			setsid();
++			execlp(urlhandler, urlhandler, url, (char *)NULL);
++			_exit(1);
++		}
++		_exit(0);
++	}
++	if (child > 0) {
++		int stat;
++
++		while (waitpid(child, &stat, 0) < 0 && errno == EINTR)
++			;
++	}
++}
++
+ void
+ selclear(void)
+ {
+--- a/st.h
++++ b/st.h
+@@ -34,6 +34,7 @@
+ 	ATTR_WIDE       = 1 << 9,
+ 	ATTR_WDUMMY     = 1 << 10,
+ 	ATTR_BOLD_FAINT = ATTR_BOLD | ATTR_FAINT,
++	ATTR_URL        = 1 << 11,
+ };
+ 
+ enum selection_mode {
+@@ -83,6 +84,8 @@
+ 
+ void kscrolldown(const Arg *);
+ void kscrollup(const Arg *);
++void seturltag(int);
++void followurl(int, int);
+ void printscreen(const Arg *);
+ void printsel(const Arg *);
+ void sendbreak(const Arg *);
+@@ -126,3 +129,5 @@
+ extern unsigned int defaultfg;
+ extern unsigned int defaultbg;
+ extern unsigned int defaultcs;
++extern char *urlhandler;
++extern char *urlprefixes[];
+--- a/config.def.h
++++ b/config.def.h
+@@ -176,8 +176,8 @@
+  */
+ static MouseShortcut mshortcuts[] = {
+ 	/* mask                 button   function        argument       release */
+-	{ ShiftMask,            Button4, kscrollup,      {.i = 1} },
+-	{ ShiftMask,            Button5, kscrolldown,    {.i = 1} },
++	{ XK_ANY_MOD,           Button4, kscrollup,      {.i = 1} },
++	{ XK_ANY_MOD,           Button5, kscrolldown,    {.i = 1} },
+ 	{ XK_ANY_MOD,           Button2, selpaste,       {.i = 0},      1 },
+ 	{ ShiftMask,            Button4, ttysend,        {.s = "\033[5;2~"} },
+ 	{ XK_ANY_MOD,           Button4, ttysend,        {.s = "\031"} },
+@@ -476,3 +476,12 @@
+ 	" !\"#$%&'()*+,-./0123456789:;<=>?"
+ 	"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_"
+ 	"`abcdefghijklmnopqrstuvwxyz{|}~";
++
++/*
++ * Ctrl+click opens URLs with this handler. xdg-open consults the desktop's
++ * default browser, so the link lands in whatever the user has configured.
++ */
++char *urlhandler = "xdg-open";
++char *urlprefixes[] = {
++	"http://", "https://", "ftp://", "file://", "mailto:", NULL
++};
+--- a/x.c
++++ b/x.c
+@@ -191,6 +191,7 @@
+ 
+ static void (*handler[LASTEvent])(XEvent *) = {
+ 	[KeyPress] = kpress,
++	[KeyRelease] = kpress,
+ 	[ClientMessage] = cmessage,
+ 	[ConfigureNotify] = resize,
+ 	[VisibilityNotify] = visibility,
+@@ -452,6 +453,15 @@
+ 	/* ignore Button<N>mask for Button<N> - it's set on release */
+ 	uint state = e->xbutton.state & ~buttonmask(e->xbutton.button);
+ 
++	/* Ctrl+click follows a link. Handled before the shortcut table so an
++	 * application that enabled mouse reporting (vim, less) cannot swallow
++	 * it - and so it works without Shift. */
++	if (!release && e->xbutton.button == Button1 &&
++	    (state & ControlMask)) {
++		followurl(evrow(e), evcol(e));
++		return 1;
++	}
++
+ 	for (ms = mshortcuts; ms < mshortcuts + LEN(mshortcuts); ms++) {
+ 		if (ms->release == release &&
+ 		    ms->button == e->xbutton.button &&
+@@ -1491,8 +1501,9 @@
+ 	/* Render the glyphs. */
+ 	XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
+ 
+-	/* Render underline and strikethrough. */
+-	if (base.mode & ATTR_UNDERLINE) {
++	/* Render underline and strikethrough. ATTR_URL borrows the underline so
++	 * a link that is already underlined keeps its single mark. */
++	if (base.mode & (ATTR_UNDERLINE | ATTR_URL)) {
+ 		XftDrawRect(xw.draw, fg, winx, winy + dc.font.ascent * chscale + 1,
+ 				width, 1);
+ 	}
+@@ -1856,6 +1867,30 @@
+ 	} else {
+ 		len = XLookupString(e, buf, sizeof buf, &ksym, NULL);
+ 	}
++
++	/* Highlight link under the pointer while Control is held.
++	 *
++	 * This lives in the key handler rather than in bmotion(): the window only
++	 * selects ButtonMotionMask (motion while a button is down), so a motion
++	 * handler would never fire for a plain pointer move and the underline
++	 * would only appear mid-drag. Reacting to the modifier keys themselves
++	 * means the links light up the moment Ctrl goes down and fade the moment
++	 * it comes up, wherever the pointer happens to be.
++	 *
++	 * KeyRelease must also be routed here for that to work - see the handler
++	 * table - so releases are dropped before the shortcut table below, which
++	 * would otherwise act on shortcuts twice. */
++	if (ksym == XK_Control_L || ksym == XK_Control_R) {
++		if (ev->type == KeyPress) {
++			seturltag(1);
++			return;             /* Ctrl alone has nothing to send */
++		}
++		seturltag(0);
++		return;
++	}
++	if (ev->type == KeyRelease)
++		return;
++
+ 	/* 1. shortcuts */
+ 	for (bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
+ 		if (ksym == bp->keysym && match(bp->mod, e->state)) {

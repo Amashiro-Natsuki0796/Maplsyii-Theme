@@ -15,7 +15,7 @@ helper behind a bar button speak X11 instead of Wayland.
 | Window manager **Sway** (Wayland) | **i3 4.24** (X11, i3-gaps merged upstream) |
 | Bar **Waybar** | **i3-everforest-bar**, a GTK3 program that draws the *same* CSS |
 | Launcher **Wofi** (440×330, 17px) | **Rofi 1.7**, same 440×330 geometry, 17px font, 41px rows, lime selection |
-| Terminal **foot** (Wayland-only) | **kitty** with foot.ini ported value for value: JetBrains Mono 11pt, 2px padding, 60 % alpha, `#000000` background, block cursor, 10 000 lines |
+| Terminal **foot** (Wayland-only) | **st** with foot.ini's look ported: JetBrains Mono 14px, 2px border, `#000000` background, block cursor. Ships with 2000 lines of scrollback, mouse-wheel scrolling, a translucent scrollbar, Ctrl+click URLs, and is registered as the default terminal |
 | Theme **Everforest-Dark-BL-LB** | GTK2/3/4 theme `Everforest-Dark-BL-LB` + libadwaita override |
 | Icons **Material-Black-Lime-Numix-FLAT** | exact icon set, bundled (no network) |
 | Notifications **mako** | **Dunst**, same Everforest palette and geometry |
@@ -189,6 +189,79 @@ Every pill responds to the pointer:
 
 The graph repaints at 30 Hz while the rest of the bar redraws only when
 something changed, so motion stays smooth without burning CPU.
+
+#### Why the CPU line scrolls evenly
+
+The trace is a strip of samples that slides one step left every 250 ms. Two
+details decide whether it looks smooth, and both are commented where they are
+implemented:
+
+* **The plot is clipped to its rectangle, and every point slides.** Without a
+  clip the left end of the line is the oldest point itself, which marches out
+  of the plot and snaps back on every sample - the hop at the tail. With the
+  clip, both ends are clean cuts at the border.
+* **The whole strip is rigid — the newest point is not pinned to the edge.**
+  Pinning looks calmer, but it breaks continuity: the head is drawn at the
+  border no matter what the phase is, so when the next sample arrives the old
+  head has to teleport left by `(1-frac)*step`, up to a full 1.18px in one
+  frame. That is the once-per-interval lurch. Sliding every point by the same
+  `frac*step` makes the array shift and the phase reset cancel exactly, so the
+  line glides. A short extrapolated segment keeps it touching the right border.
+* **The phase is divided by the *measured* sample interval.** Samples are gated
+  on the 33 ms loop, so they really arrive every ~253 ms rather than 250 ms.
+  Dividing by the nominal constant made the phase reach 1.0 before the sample
+  did; wrapping it there threw away up to a full step, and clamping it made the
+  line stall for a frame. The interval is measured (and smoothed) per sample,
+  so the phase ends where the next sample begins.
+
+### Terminal
+
+`st` is built at install time with four patches from the suckless queue
+(`assets/st-patches/`):
+
+| Feature | How it behaves |
+|---|---|
+| Scrollback | 2000 lines; `Shift+PageUp` / `Shift+PageDown` walks them |
+| Mouse wheel | scrolls the buffer without a modifier; with `Shift` held the wheel bytes still go to the application, which is what `vim`, `less` and `man` expect |
+| Scrollbar | a translucent, rounded thumb on the right edge; drag it or click anywhere on the strip to jump. Hidden until there is history to scroll |
+| URLs | holding `Ctrl` underlines every link on screen; `Ctrl+click` opens the one under the pointer with `xdg-open`, so the desktop's default browser is used |
+
+Links may wrap across lines: the scanner follows the wrap, so a URL that spans
+two rows is underlined as a whole and opens as a whole. Trailing sentence
+punctuation is trimmed, and a bare `https://` is not treated as a link.
+
+#### The scrollbar is translucent, not a black stripe
+
+The window is already see-through (`ST_ALPHA`), so the scrollbar has to be
+composited the same way the text is, or it reads as an opaque bar pasted over
+the wallpaper. Three details in `xdrawscrollbar()` do that:
+
+* **Nothing opaque is painted.** The track is left unpainted entirely; only the
+  thumb is drawn, with its own alpha, so the wallpaper keeps showing through.
+* **The colours are premultiplied.** A 32-bit X pixmap is premultiplied ARGB and
+  `XftDrawRect` writes straight into it without compositing, so each channel is
+  scaled by the alpha first. Without that the thumb renders flat and opaque.
+* **The caps are round.** Xft offers no drawing primitives past rectangles, so
+  each cap is a stack of one-pixel rows inset by `r - sqrt(r^2 - dy^2)`.
+
+Width, opacity and colour come from `config.h` (`scrollbar_width`,
+`scrollbar_alpha`, `scrollbar_fg`).
+
+#### Making st the default terminal
+
+`Mod+Return` only covers the i3 binding. Everything else that asks for "a
+terminal" - `x-terminal-emulator`, xdg-open on a `Terminal=true` desktop entry,
+`sensible-terminal`, the i3-everforest helpers - goes through a different
+path, so `write_default_terminal()` sets all of them:
+
+* registers `st` with Debian's `x-terminal-emulator` alternative at priority 60
+  and pins it with `--set`, so a later package install cannot take the slot back
+* exports `TERMINAL=st` in `~/.xsessionrc`, which most lightweight tools check
+  first
+* falls back to `foot` (the rice's original terminal) if the st build failed,
+  then to `kitty`
+
+`--uninstall` removes the alternative again and returns it to `auto`.
 
 ### Implementation notes
 
@@ -407,6 +480,9 @@ with `--no-apps`.
 /usr/share/icons/Material-Black-Lime-Numix-FLAT
 /usr/share/xsessions/i3-everforest.desktop
 /usr/local/bin/i3-everforest-session   session launcher used by the entry
+/usr/local/bin/st                   the terminal (built from source at install)
+/usr/local/src/i3-everforest-st     st source tree + the patches that were applied
+/usr/local/share/applications/st.desktop   so launchers list the terminal
 /usr/local/bin/mf                  the two-column fetch block
 /usr/share/sddm/themes/silent      SilentSDDM (stock configs/default.conf)
 /etc/sddm.conf.d/10-i3-everforest.conf
@@ -430,7 +506,7 @@ with `--no-apps`.
 
 | Keys | Action |
 |---|---|
-| `Mod+Return` | terminal (kitty) |
+| `Mod+Return` | terminal (st) |
 | `Mod+D` | application launcher (rofi) |
 | `Mod+E` | files (pcmanfm) |
 | `Mod+Shift+Return` | btop |

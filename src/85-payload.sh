@@ -58,6 +58,9 @@ assets_unpack_from_self() {
 	if [[ -f "${dir}/bar-c.tar.xz" ]]; then
 		tar -xJf "${dir}/bar-c.tar.xz" -C "${dir}" 2>/dev/null || ui_warn "the bar source payload is damaged"
 	fi
+	if [[ -f "${dir}/st-patches.tar.xz" ]]; then
+		tar -xJf "${dir}/st-patches.tar.xz" -C "${dir}" 2>/dev/null || ui_warn "the st patch payload is damaged"
+	fi
 	if [[ -f "${dir}/fonts.tar.xz" ]]; then
 		mkdir -p "${dir}/fonts"
 		tar -xJf "${dir}/fonts.tar.xz" -C "${dir}/fonts" 2>/dev/null || ui_warn "the font payload is damaged"
@@ -93,8 +96,9 @@ assets_prepare() {
 	if [[ -d "${dir}/sddm/silent" ]]; then n=$((n + 1)); fi
 	if [[ -d "${dir}/fonts" ]]; then n=$((n + 1)); fi
 	if [[ -d "${dir}/bar" ]]; then n=$((n + 1)); fi
+	if [[ -f "${dir}/bar-c.tar.xz" ]]; then n=$((n + 1)); fi
 	((n > 0)) || { ui_warn "the embedded payload is empty"; return 1; }
-	ui_ok "assets ready (${n}/6)"
+	ui_ok "assets ready (${n}/7)"
 	return 0
 }
 

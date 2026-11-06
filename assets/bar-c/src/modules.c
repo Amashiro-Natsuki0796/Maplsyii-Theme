@@ -8,6 +8,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <X11/Xatom.h>
 
 #include "bar.h"
 
@@ -37,24 +38,6 @@ trim_utf8(char *s)
 		}
 	}
 	s[len - (len > 3 ? 3 : len)] = '\0';
-}
-
-static void
-capture(const char *cmd, char *out, size_t n)
-{
-	FILE *f = popen(cmd, "r");
-	char *nl;
-
-	if (!f) { out[0] = '\0'; return; }
-	if (!fgets(out, (int)n, f))
-		out[0] = '\0';
-	nl = strchr(out, '\n');
-	if (nl)
-		*nl = '\0';
-	else
-		out[n - 1] = '\0';
-	trim_utf8(out);
-	pclose(f);
 }
 
 /* ---------- workspaces ------------------------------------------------- */
@@ -128,20 +111,80 @@ module_separator(Bar *b, int x, int y, int h)
 
 /* ---------- window title ----------------------------------------------- */
 
+/* Read the active window's title straight from X, with no fork.
+ *
+ * This replaces `xdotool getactivewindow getwindowname`, which forked a
+ * process on every redraw. Two problems with that:
+ *
+ *   - the fork is the bar's last remaining per-frame process spawn (~15/s);
+ *   - while xdotool ran, the capture could return an empty string, and because
+ *     hovering a control triggers a full redraw, moving the pointer onto the
+ *     bar made the centre title disappear for a frame. That is the flicker.
+ *
+ * The result is cached against the active window id, so the X round trip only
+ * happens when the user actually switches windows.
+ */
+static void
+refresh_wintitle(Bar *b)
+{
+	Atom active = XInternAtom(b->dpy, "_NET_ACTIVE_WINDOW", False);
+	Atom utf8 = XInternAtom(b->dpy, "UTF8_STRING", False);
+	Atom netname = XInternAtom(b->dpy, "_NET_WM_NAME", False);
+	Atom prop = None;
+	int fmt = 0;
+	unsigned long n = 0, after = 0;
+	unsigned char *data = NULL;
+	Window w = None;
+
+	/* Which window is active? Ask the root window; fall back to input focus. */
+	if (XGetWindowProperty(b->dpy, DefaultRootWindow(b->dpy), active, 0, 1,
+	                       False, XA_WINDOW, &prop, &fmt, &n, &after,
+	                       &data) == Success && data) {
+		w = *(Window *)data;
+		XFree(data);
+		data = NULL;
+	}
+	if (w == None) {
+		int revert;
+
+		XGetInputFocus(b->dpy, &w, &revert);
+		if (w == PointerRoot || w == None)
+			return;
+	}
+
+	if (w == b->st.winid && b->st.wintitle[0])
+		return;                      /* unchanged: keep the cached title */
+
+	/* _NET_WM_NAME is UTF-8; WM_NAME may be Latin-1. Try the modern one
+	 * first and only fall back when it is absent. */
+	if (XGetWindowProperty(b->dpy, w, netname, 0, sizeof b->st.wintitle - 1,
+	                       False, utf8, &prop, &fmt, &n, &after,
+	                       &data) == Success && data) {
+		snprintf(b->st.wintitle, sizeof b->st.wintitle, "%s", (char *)data);
+		XFree(data);
+	} else if (XFetchName(b->dpy, w, (char **)&data) && data) {
+		snprintf(b->st.wintitle, sizeof b->st.wintitle, "%s", (char *)data);
+		XFree(data);
+	} else {
+		b->st.wintitle[0] = '\0';
+	}
+	b->st.winid = w;
+	trim_utf8(b->st.wintitle);
+}
+
 int
 module_window(Bar *b, int x, int y, int h, int max_w)
 {
-	char buf[512];
-	capture("xdotool getactivewindow getwindowname 2>/dev/null", buf, sizeof buf);
 	(void)h;
-	if (!buf[0])
+	refresh_wintitle(b);
+	if (!b->st.wintitle[0])
 		return 0;
 
 	if (x == MEASURE_X)
-		return text_width(b, buf);
+		return text_width(b, b->st.wintitle);
 
 	char shown[512];
-	snprintf(shown, sizeof shown, "%s", buf);
+	snprintf(shown, sizeof shown, "%s", b->st.wintitle);
 
 	/* waybar's max-length 60, then fit to the available width by dropping one
 	 * character at a time (the previous version shaved four). */
@@ -192,59 +235,81 @@ void
 module_draw_cpu_graph_at(Bar *b, cairo_t *cr, int x, int y, int w, int h)
 {
 	int n = b->st.cpu_len;
-	double step;
-	double pts[GRAPH_POINTS][2];
+	double step = (double)w / (GRAPH_POINTS - 1);
+	double pts[GRAPH_POINTS + 1][2];
+	int np;
 
 	if (n < 2)
 		return;
 
-	step = (double)w / (GRAPH_POINTS - 1);
-
-	/* Continuous motion without a snap at the sample boundary.
-	 *
-	 * Each new sample enters from the right edge and slides into place over the
-	 * following interval, while the rest of the line creeps left at the same
-	 * rate. The previous version reset the offset to zero on every sample,
-	 * which pulled the whole line back a step - the visible "jump". */
 	/* Fractional progress toward the next sample, 0..1. */
 	double frac = b->st.cpu_frac;
 
 	if (frac < 0) frac = 0;
-	if (frac >= 1.0) frac -= 1.0;
+	if (frac > 1.0) frac = 1.0;
 
-	/* The newest sample stays pinned to the right edge; every older point
-	 * drifts left continuously.
+	/* One rigid strip, sliding left by frac*step.
 	 *
-	 * The previous version shifted the whole line left by frac*step, which
-	 * pushed the head past the right edge where the clip cut it off. It then
-	 * reappeared a pixel at a time - the visible hopping. Pinning the head and
-	 * moving the body keeps both edges still. */
+	 * Every point uses the same formula, the newest included. That is what
+	 * makes the motion continuous across a sample boundary: when the strip has
+	 * travelled a whole step (frac reaches 1) the array shift and the phase
+	 * reset cancel exactly, so the point that was at w - frac*step is now at
+	 * w - step - 0, the same place.
+	 *
+	 * Pinning the newest sample to the right edge - which an earlier version
+	 * did, because it looked calmer there - breaks that identity: the head is
+	 * drawn at w no matter where the phase is, so the moment a new sample
+	 * arrives the old head has to teleport left by (1-frac)*step, up to a
+	 * full 1.18px, in a single frame. That was the stutter: a periodic lurch
+	 * once per 250ms, which is exactly what "the line moves in bursts" means.
+	 *
+	 * Both ends are cut by the clip below, so neither terminus depends on a
+	 * particular point sitting on the border. */
 	for (int i = 0; i < n; i++) {
 		int v = (unsigned char)b->st.cpu_history[i];
-		double px;
 
-		if (i == n - 1) {
-			px = w;                       /* head: always on the edge */
-		} else {
-			/* Body: each sample is one step apart, shifted left by the
-			 * elapsed fraction of the current interval. */
-			px = w - (double)(n - 1 - i) * step - frac * step;
-		}
+		pts[i][0] = w - (double)(n - 1 - i) * step - frac * step;
+		pts[i][1] = h - (v / 100.0) * (h - 2) - 1;
+	}
+	np = n;
 
-		double py = h - (v / 100.0) * (h - 2) - 1;
-		pts[i][0] = px;
-		pts[i][1] = py;
+	/* Extend the strip past the right edge.
+	 *
+	 * The newest sample sits at w - frac*step, so as the phase grows the line
+	 * stops short of the right border and a gap opens up. Continue the last
+	 * segment (or, on a flat tail, a horizontal run) out to w + step so the
+	 * clip has something to cut at the border. Without this the head would be
+	 * a detached stub that visibly detaches and re-attaches every interval -
+	 * trading one artefact for another. */
+	if (pts[np - 1][0] < w) {
+		double y0 = pts[np - 1][1];
+
+		/* Flatten the very last bit, so a steep final segment does not shoot
+		 * off the top of the plot when extrapolated. */
+		pts[np][0] = w + step;
+		pts[np][1] = y0;
+		np++;
 	}
 
 	cairo_save(cr);
 	cairo_translate(cr, x, y);
 
+	/* Clip to the plot area.
+	 *
+	 * Without this the sliding tail was painted over the pill padding and the
+	 * memory label to its left, and the fill under the line reached into that
+	 * gap as well. Clipping gives the left edge the same hard border the right
+	 * edge has always had, so the line reads as a window onto a scrolling
+	 * trace instead of a strip whose end wanders. */
+	cairo_rectangle(cr, 0, 0, w, h);
+	cairo_clip(cr);
+
 	/* Filled area under the line, then the line itself. */
 	cairo_new_path(cr);
 	cairo_move_to(cr, pts[0][0], h);
-	for (int i = 0; i < n; i++)
+	for (int i = 0; i < np; i++)
 		cairo_line_to(cr, pts[i][0], pts[i][1]);
-	cairo_line_to(cr, pts[n - 1][0], h);
+	cairo_line_to(cr, pts[np - 1][0], h);
 	cairo_close_path(cr);
 	cairo_set_source_rgba(cr, 0.902, 0.706, 0.314, 0.26);
 	cairo_fill(cr);
@@ -257,7 +322,7 @@ module_draw_cpu_graph_at(Bar *b, cairo_t *cr, int x, int y, int w, int h)
 	cairo_stroke(cr);
 
 	cairo_new_path(cr);
-	for (int i = 0; i < n; i++) {
+	for (int i = 0; i < np; i++) {
 		if (i == 0)
 			cairo_move_to(cr, pts[i][0], pts[i][1]);
 		else

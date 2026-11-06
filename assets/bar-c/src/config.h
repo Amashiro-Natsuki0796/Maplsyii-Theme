@@ -110,7 +110,12 @@
 #define MEASURE_X (-99999)
 
 /* --- refresh cadence --------------------------------------------------- */
-#define TICK_MS          33     /* 30Hz main loop tick */
+/* The main loop wakes for the CPU graph, the only continuously moving
+ * element, and otherwise sleeps until X or i3 has an event. 15Hz is smooth
+ * for a sparkline and halves the wakeups (and therefore the compositor's
+ * work) against the old 30Hz. */
+#define GRAPH_TICK_MS    66     /* 15Hz: CPU graph redraw cadence */
+#define TICK_MS          33     /* retained for the click feedback path */
 #define TICK_CLOCK_MS   1000
 #define TICK_SYSINFO_MS 250
 #define TICK_NETWORK_MS 3000

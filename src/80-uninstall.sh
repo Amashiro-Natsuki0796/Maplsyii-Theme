@@ -60,6 +60,26 @@ uninstall_files() {
 	return 0
 }
 
+uninstall_default_terminal() {
+	# Undo what write_default_terminal() did.
+	#
+	# The alternative is removed only when it still points at a terminal this
+	# script installed. If the user has since picked something else by hand,
+	# removing our entry is still correct but resetting the link is not - the
+	# display manager finds no x-terminal-emulator at all otherwise.
+	local t
+	for t in /usr/local/bin/st /usr/bin/foot; do
+		[[ -e "${t}" ]] || continue
+		update-alternatives --remove x-terminal-emulator "${t}" \
+			>/dev/null 2>&1 || true
+	done
+	if have update-alternatives; then
+		update-alternatives --auto x-terminal-emulator >/dev/null 2>&1 || true
+	fi
+	ui_dim "default terminal alternative released"
+	return 0
+}
+
 uninstall_dirs() {
 	local kind path n=0
 	[[ -f "${MANIFEST}" ]] || return 0
@@ -295,9 +315,11 @@ do_uninstall() {
 	uninstall_dirs
 	# 4. strip the bash block (restored in step 1: do it again, harmlessly)
 	uninstall_bash_block
-	# 5. tidy empty directories it may have created
+	# 5. release the x-terminal-emulator alternative
+	uninstall_default_terminal
+	# 6. tidy empty directories it may have created
 	uninstall_tidy_dirs
-	# 6. optionally remove packages
+	# 7. optionally remove packages
 	uninstall_packages
 
 	ui_ok "uninstalled"

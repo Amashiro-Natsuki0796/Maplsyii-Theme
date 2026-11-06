@@ -29,9 +29,20 @@ typedef struct {
 	unsigned long cpu_seq;   /* bumps on every sample */
 	double cpu_frac;         /* 0..1 progress toward the next sample */
 	unsigned long cpu_last_ms;
+	double cpu_interval_ms;  /* measured gap between samples, see refresh_cpu */
 	int network_connected;
 	char clock[16];
 	char date[64];
+	/* Active-window title, cached.
+	 *
+	 * module_window() used to fork `xdotool getactivewindow getwindowname` on
+	 * every bar_draw(). Hovering a control triggers a full bar_draw(), so every
+	 * pointer move into the bar re-ran that fork; while it was in flight the
+	 * capture could come back empty and the centre title vanished for a frame -
+	 * the "title flickers on hover" bug. Caching it removes both the fork and
+	 * the flicker. */
+	char wintitle[512];
+	Window winid;
 	int ws_count;
 	struct {
 		int num;
@@ -146,6 +157,11 @@ int text_width_sized(Bar *b, const char *text, double size, int weight);
 
 /* util.c */
 void spawn(const char *cmd);
+int  i3_get_workspaces(char *out, size_t outsz);
+int  i3_subscribe(void);
+int  i3_fd_get(void);
+int  i3_pending(void);
+void i3_read_event(void);
 void set_region_tip(Bar *b, const char *tip);
 void tooltip_show(Bar *b, const char *text, int x, int w);
 void tooltip_close(Bar *b);
