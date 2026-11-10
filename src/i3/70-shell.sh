@@ -510,6 +510,14 @@ wifi_dev() {
 		awk -F: '$2=="wifi"{print $1; exit}'
 }
 
+# Fall back to Ethernet when the machine has no wireless adaptor at all.
+# A desktop with only a cable should still get a network menu, not a "no
+# wireless adaptor" notification.
+ethernet_dev() {
+	nmcli -t -f DEVICE,TYPE device 2>/dev/null |
+		awk -F: '$2=="ethernet"{print $1; exit}'
+}
+
 # Current SSID, empty when disconnected.
 active_ssid() {
 	nmcli -t -f ACTIVE,SSID device wifi list 2>/dev/null |
@@ -570,70 +578,182 @@ join_network() {
 	say "Could not join $ssid (wrong password?)" 5000 1
 }
 
+# Menu for a machine with no wireless adaptor.
+#
+# The wired link cannot be "joined" like a wifi network - the plug either
+# carries a link or it does not - so the useful actions are status, enable /
+# disable the interface, and the connection editor.
+show_wired_menu() {
+	dev=$(ethernet_dev)
+	if [ -z "$dev" ]; then
+		say "No network adaptor detected"
+	fi
+
+	state=$(nmcli -t -f GENERAL.STATE device show "$dev" 2>/dev/null |
+		cut -d: -f2- | head -1)
+	conn=$(nmcli -t -f GENERAL.CONNECTION device show "$dev" 2>/dev/null |
+		cut -d: -f2- | head -1)
+	ip=$(nmcli -t -f IP4.ADDRESS device show "$dev" 2>/dev/null |
+		cut -d: -f3 | head -1)
+
+	if printf '%s' "$state" | grep -q "connected"; then
+		label="Ethernet  $dev   ${ip:-no address}"
+	else
+		label="Ethernet  $dev   (disconnected)"
+	fi
+
+	choice=$(printf '%s\n' \
+		"$label" \
+		"Connect" \
+		"Disconnect" \
+		"Open advanced editor" \
+		"Copy IP to clipboard" \
+		"Close" |
+		rofi -dmenu -p "Network" -theme i3-everforest \
+			-theme-str 'window {width: 520px; height: 300px;}' \
+			-theme-str 'listview {lines: 6;}' 2>/dev/null)
+
+	[ -n "$choice" ] || exit 0
+	case "$choice" in
+	Connect)
+		[ -n "$conn" ] && nmcli connection up "$conn" >/dev/null 2>&1
+		nmcli device connect "$dev" >/dev/null 2>&1 &&
+			say "Connected $dev" 2500 0
+		say "Could not bring $dev up" 3500 1
+		;;
+	Disconnect)
+		nmcli device disconnect "$dev" >/dev/null 2>&1 &&
+			say "Disconnected $dev" 2500 0
+		say "Could not disconnect $dev" 3500 1
+		;;
+	Open*)
+		if command -v nm-connection-editor >/dev/null 2>&1; then
+			nm-connection-editor >/dev/null 2>&1 &
+		elif command -v nmtui >/dev/null 2>&1; then
+			st -e nmtui >/dev/null 2>&1 &
+		else
+			say "No connection editor installed" 3000 1
+		fi
+		exit 0
+		;;
+	Copy*)
+		if [ -n "$ip" ] && command -v xclip >/dev/null 2>&1; then
+			printf '%s' "$ip" | xclip -selection clipboard 2>/dev/null
+			say "Copied $ip" 2000 0
+		fi
+		say "No IP to copy" 2500 1
+		;;
+	esac
+	exit 0
+}
+
 show_list() {
 	have_nm || say "NetworkManager is not running"
 
 	dev=$(wifi_dev)
-	[ -n "$dev" ] || say "No wireless adaptor detected"
 
-	# Read the snapshot a background refresher keeps warm (see
-	# i3-everforest-wifi-cache). Falling back to a live call is only needed the
-	# very first time, before the cache exists.
-	cache="${XDG_RUNTIME_DIR:-/tmp}/i3-everforest-wifi.cache"
-	snapshot=""
-	if [ -f "${cache}" ]; then
-		snapshot=$(cat "${cache}" 2>/dev/null)
+	# No wireless adaptor: show the wired link instead of an error. The bar
+	# draws an Ethernet icon in that case, so the menu it opens has to match.
+	if [ -z "$dev" ]; then
+		show_wired_menu
+		return 0
 	fi
-	if [ -z "${snapshot}" ]; then
-		snapshot=$(nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list 2>/dev/null)
-	fi
-	cur=$(printf '%s\n' "$snapshot" | awk -F: '$1=="*"{print $2; exit}')
-	rows=$(printf '%s\n' "$snapshot" | awk -F: 'NF>=4 && $2!="" {
-		act = ($1=="*") ? "1" : "0"
-		sec = ($4 ~ /WPA|WEP|802/) ? "1" : "0"
-		sig = $3 + 0
-		if (!($2 in best) || sig > best[$2]) {
-			best[$2] = sig; sect[$2] = sec; actv[$2] = act
-		}
-	}
-	END {
-		for (s in best)
-			printf "%s\t%d\t%s\t%s\n", s, best[s], sect[s], actv[s]
-	}' | sort -t"	" -k2,2nr)
-	[ -n "$rows" ] || say "No networks found (is the radio on?)"
 
-	# Display: SSID, signal%, and the security type. No leading glyphs - the
-	# list is easier to scan when the names line up.
-	display=$(printf '%s\n' "$rows" | awk -F'\t' -v cur="$cur" '
-		{
-			sig = $2 + 0
-			star = ($4 == "1" || $1 == cur) ? "  *" : ""
-			lock = ($3 == "1") ? "WPA" : "open"
-			printf "%-26s %3d%%  %-4s%s\t%s\n", $1, sig, lock, star, $1
-		}')
+	# Pop the menu open first, then scan on demand.
+	#
+	# The previous version kept a 20-second background refresher alive so the
+	# list could be read from a cache. That worked, but it meant a radio scan
+	# every 20 seconds forever, even when nobody was looking - pointless power
+	# draw and radio noise. This scans only when the menu is opened.
+	#
+	# The progress text goes in rofi\'s -mesg area, not into the list. rofi
+	# treats every stdin line as a new list entry and cannot rewrite one, so
+	# streaming "Scanning .", "Scanning .." frames produced a column of
+	# near-identical rows instead of a live line. -mesg is a separate text area
+	# rofi owns, so the list stays clean and only ever shows real networks.
+	fifo=$(mktemp -u /tmp/i3-ef-wifi-XXXXXX)
+	mkfifo "$fifo" || say "Could not create the wifi menu pipe"
+	chmod 600 "$fifo"
 
-	tmp_list=$(mktemp /tmp/i3-ef-wifi-XXXXXX)
-	printf '%s\n' "$display" | cut -f1 >"${tmp_list}"
+	# The scan runs in the background and reports through a flag file. The
+	# writer below holds the pipe open, so rofi renders its window (with the
+	# -mesg line) immediately.
+	( nmcli device wifi rescan >/dev/null 2>&1
+	  attempt=0
+	  while [ "$attempt" -lt 12 ]; do
+		  nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list \
+			  >"${fifo}.done" 2>/dev/null
+		  [ -s "${fifo}.done" ] && break
+		  attempt=$((attempt + 1))
+		  sleep 0.5
+	  done
+	  : >"${fifo}.ready" ) &
+
+	# Writer: block until the scan finishes, then emit the rows and close, which
+	# tells rofi the list is complete.
+	(
+		while [ ! -e "${fifo}.ready" ]; do sleep 0.2; done
+		snapshot=$(cat "${fifo}.done" 2>/dev/null)
+		cur=$(printf '%s\n' "$snapshot" | awk -F: '$1=="*"{print $2; exit}')
+		printf '%s\n' "$snapshot" | awk -F: -v cur="$cur" \
+			'NF>=4 && $2!="" {
+				sig = $3 + 0
+				if (!($2 in best) || sig > best[$2]) {
+					best[$2] = sig; sec[$2] = $4
+				}
+			}
+			END {
+				for (s in best) {
+					lock = (sec[s] ~ /WPA|WEP|802/) ? "WPA" : "open"
+					star = (s == cur) ? "  *" : ""
+					printf "%-26s %3d%%  %-4s%s\n", s, best[s], lock, star
+				}
+			}' | sort -k2,2nr
+	) >"$fifo" &
+
+	# The -mesg line is rofi's own progress area: the list stays clean and the
+	# user sees that a scan is running. rofi cannot change -mesg after launch, so
+	# the line remains visible once the rows arrive - it is accurate either way
+	# ("Scanning for networks..." while empty, a caption afterwards).
 	sel=$(rofi -dmenu -p "WiFi" -theme i3-everforest \
+		-mesg "Scanning for networks..." \
 		-theme-str 'window {width: 500px; height: 340px;}' \
-		-theme-str 'listview {lines: 9;}' \
-		-input "${tmp_list}" 2>/dev/null)
-	rm -f "${tmp_list}"
+		-theme-str 'listview {lines: 9;}' <"$fifo" 2>/dev/null)
+
+	rm -f "$fifo" "${fifo}.done" "${fifo}.ready" 2>/dev/null
+
 	[ -n "$sel" ] || exit 0
+	case "$sel" in
+	Scanning*|No\ networks*) exit 0 ;;
+	esac
 
-	# Map the chosen display row back to the raw SSID.
-	ssid=$(printf '%s\n' "$display" | awk -F'\t' -v s="$sel" '$1==s{print $2; exit}')
+	ssid=$(printf '%s\n' "$sel" | sed 's/  \*$//' | awk '{
+		n = split($0, a, "  ");
+		print a[n]
+	}')
 	[ -n "$ssid" ] || exit 0
+	join_network "$ssid" 1
+}
 
-	secured=$(printf '%s\n' "$rows" | awk -F'\t' -v s="$ssid" '$1==s{print $3; exit}')
-	join_network "$ssid" "${secured:-1}"
+show_config() {	join_network "$ssid" 1
+}
+
+show_config() {	join_network "$ssid" 1
+}
+
+show_config() {	join_network "$ssid" 1
+}
+
+show_config() {	join_network "$ssid" 1
 }
 
 show_config() {
 	have_nm || say "NetworkManager is not running"
 
 	dev=$(wifi_dev)
-	[ -n "$dev" ] || say "No wireless adaptor detected"
+	# Ethernet-only machine: detail the wired link rather than refusing.
+	[ -n "$dev" ] || dev=$(ethernet_dev)
+	[ -n "$dev" ] || say "No network adaptor detected"
 
 	# Collect everything NetworkManager knows about the link.
 	fields=$(nmcli -t -f GENERAL.STATE,GENERAL.CONNECTION,GENERAL.HWADDR,\
@@ -763,20 +883,6 @@ WIFI
 	# for ~10s whenever its internal cache has expired, and paying that on a
 	# click is unacceptable; polling in the background means the popup always
 	# reads a ready-made snapshot.
-	cat >/usr/local/bin/i3-everforest-wifi-cache <<'WCACHE'
-#!/bin/sh
-# Refresh the wifi snapshot every 20s so the bar's popup opens instantly.
-export LC_ALL=C
-cache="${XDG_RUNTIME_DIR:-/tmp}/i3-everforest-wifi.cache"
-while :; do
-	nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list \
-		>/tmp/.wf.$$ 2>/dev/null &&
-		mv /tmp/.wf.$$ "${cache}" 2>/dev/null
-	sleep 20
-done
-WCACHE
-	chmod 755 /usr/local/bin/i3-everforest-wifi-cache
-	register_file /usr/local/bin/i3-everforest-wifi-cache
 	register_file /usr/local/bin/i3-everforest-wifi
 
 	# The bar's wifi control is nmcli-only, so NetworkManager has to own the

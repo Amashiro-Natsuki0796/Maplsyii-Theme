@@ -218,7 +218,7 @@ module_clock(Bar *b, int x, int y, int h)
 
 	if (x != MEASURE_X) {
 		draw_text_n(b, x + PILL_PAD_X, y, label, FONT_SIZE, FONT_WEIGHT,
-		            C_CREAM);
+		            C_TEXT);
 		add_region(b, x + PILL_MARGIN, y + PILL_MARGIN, w,
 		           h - 2 * PILL_MARGIN,
 		           "i3-everforest-calendar", NULL,
@@ -436,22 +436,34 @@ module_network(Bar *b, int x, int y, int h)
 			int ix = bx + (w - 18) / 2;
 			int iy = by + (bh - 14) / 2;
 
-			if (b->st.network_connected) {
-				draw_wifi(b, ix, iy, 18, 14,
-				          WIFI_TOP, WIFI_MID, WIFI_DOT);
+			/* Wireless and wired get their own symbol; a machine with only
+			 * an Ethernet port should not advertise a wifi icon it can never
+			 * use. Connected state is carried by colour: the tricolour wifi
+			 * arcs or a plain terminal-coloured plug when up, alert red when
+			 * down. */
+			if (b->st.network_is_wifi) {
+				if (b->st.network_connected)
+					draw_wifi(b, ix, iy, 18, 14,
+					          WIFI_TOP, WIFI_MID, WIFI_DOT);
+				else
+					draw_wifi(b, ix, iy, 18, 14,
+					          C_ALERT, C_ALERT, C_ALERT);
 			} else {
-				/* Disconnected keeps the same shape in the alert colour, so
-				 * the state reads at a glance. */
-				draw_wifi(b, ix, iy, 18, 14,
-				          C_ALERT, C_ALERT, C_ALERT);
+				if (b->st.network_connected)
+					draw_ethernet(b, ix, iy, 18, 14,
+					              WIFI_DOT);
+				else
+					draw_ethernet(b, ix, iy, 18, 14,
+					              C_ALERT);
 			}
 		}
 
 		add_region(b, bx, by, w, bh,
 		           "i3-everforest-wifi", NULL,
 		           "i3-everforest-wifi config");
-		set_region_tip(b, "Network\n"
-		                 "Left: scan networks   Right: connection details");
+		set_region_tip(b, b->st.network_is_wifi
+		                 ? "Wi-Fi\nLeft: scan networks   Right: connection details"
+		                 : "Ethernet\nLeft: network settings   Right: connection details");
 	}
 	return w + 2 * PILL_MARGIN;
 }
@@ -471,7 +483,7 @@ module_launcher(Bar *b, int x, int y, int h)
 		int by = y + PILL_MARGIN;
 		int bh = h - 2 * PILL_MARGIN;
 
-		draw_pill(b, bx, by, w, bh, C_LAUNCHER);
+		draw_pill_r(b, bx, by, w, bh, R_LAUNCHER, C_LAUNCHER);
 		draw_text_n(b, bx + PAD_LAUNCHER + (cw - tw) / 2, y + 1, glyph,
 		            FONT_SIZE, PANGO_WEIGHT_HEAVY, C_LAUNCHER_FG);
 		add_region(b, bx, by, w, bh,

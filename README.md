@@ -29,6 +29,99 @@ on a machine with no network at all.
 
 ---
 
+## The Sway variant
+
+`src/sway/` builds a second installer (`src/build-sway.sh` → `sway-setup.sh`)
+for the same rice on Wayland. Most of the desktop is shared; the parts that
+differ are the compositor, the terminal and the bar.
+
+### The bar is a native Wayland C program, not Waybar
+
+`assets/bar-sway/` is a cairo bar written against `wl_shm` and
+`wlr-layer-shell`. It is a direct port of the X11 bar (`assets/bar-i3`): the same
+drawing code, the same module order, the same palette.
+
+It exists because **Waybar cannot draw the CPU sparkline**. A `custom` module
+emits text, and a character cell cannot hold a 1.6px polyline — the closest
+approximations (block glyphs, then braille dots) were both visibly wrong
+against the i3 screenshot. Drawing into a shm buffer with cairo gives the exact
+same 46×20 plot, including the filled area under the line and the 50% guide.
+
+Measured on the same machine, same desktop:
+
+| | Waybar | `i3-everforest-bar-wl` |
+|---|---|---|
+| PSS | 29 MB | **5.5 MB** |
+| CPU | 0.5% | 0.7% |
+| Link-time deps | 114 | 12 |
+
+The CPU figure is slightly higher because the C bar redraws the graph at 15Hz
+where Waybar polls once a second; it buys a line that actually moves.
+
+### Why the X11 bar could not simply be reused
+
+It calls `XGetImage(RootWindow(...))` to sample the wallpaper behind the panel.
+Under XWayland that request fails with `BadMatch` — a Wayland compositor never
+hands out root-window pixels — and the bar dies on startup. The Wayland version
+has no such code at all: it paints with an alpha channel and lets the
+compositor blend, which is both simpler and more correct.
+
+### Terminal: foot, configured to match st
+
+| | st (X11) | foot (Wayland) |
+|---|---|---|
+| Background | `ST_ALPHA=78` | `alpha=0.78` |
+| Wheel scroll | one line per notch | `multiplier=1.0` |
+| Links | underlined, clickable | always underlined, `Ctrl+Shift+o` |
+
+foot has no scrollbar and no "open the link at this coordinate" action, so
+those two st behaviours have no Wayland equivalent; everything else matches.
+
+### Building the bar
+
+The installer compiles it on the target, so it links against that machine's
+libwayland/cairo/pango:
+
+```bash
+sudo apt install wayland-protocols libwayland-dev libxkbcommon-dev \
+                 libcairo2-dev libpango1.0-dev
+cd assets/bar-sway && make
+```
+
+There is **no Waybar fallback**: if the build fails the installer stops. A bar
+is not optional, and silently swapping in a different one would hide the
+failure behind a UI that looks almost right.
+
+---
+
+## Project layout
+
+```
+sway-everforest/
+├── README.md
+├── i3-setup.sh              built by src/build-i3.sh
+├── sway-setup.sh            built by src/build-sway.sh
+├── assets/                  everything both rices install
+│   ├── bar-config/          i3 bar settings (bar.json)
+│   ├── bar-i3/              X11 C bar sources
+│   ├── bar-sway/            Wayland C bar sources
+│   ├── tools/               standalone commands embedded into the installer
+│   ├── fonts/  gtk-theme/  icons/  sddm/  st-patches/
+│   ├── wallpaper.jpg
+│   └── user-avatar.jpg
+└── src/
+    ├── build-i3.sh          assemble the i3 installer
+    ├── build-sway.sh        assemble the sway installer
+    ├── i3/                  i3 installer sections, in load order
+    └── sway/                sway installer sections, in load order
+```
+
+The two rices share `assets/` but keep separate source directories, so each can
+evolve without disturbing the other. Both build scripts anchor on the project
+root, so they can be run from anywhere; the installer lands next to this README
+and no build output is kept in the tree.
+
+
 ## Quick start
 
 An interactive run opens with a three-way action menu:
@@ -42,8 +135,8 @@ An interactive run opens with a three-way action menu:
 Pass `--yes`, `--uninstall` or `--dry-run` to skip that question entirely.
 
 ```sh
-chmod +x i3-everforest-installer.sh
-sudo ./i3-everforest-installer.sh
+chmod +x i3-setup.sh
+sudo ./i3-setup.sh
 ```
 
 You get a numbered menu; type a number to toggle a component, then `i` to
@@ -69,15 +162,15 @@ Afterwards: **reboot**. SDDM comes up with the SilentSDDM greeter; pick
 ### Non-interactive
 
 ```sh
-sudo ./i3-everforest-installer.sh --yes                  # everything
-sudo ./i3-everforest-installer.sh --only-dots --yes      # configs only
-sudo ./i3-everforest-installer.sh --only-theme --yes     # theme + icons only
+sudo ./i3-setup.sh --yes                  # everything
+sudo ./i3-setup.sh --only-dots --yes      # configs only
+sudo ./i3-setup.sh --only-theme --yes     # theme + icons only
 ```
 
 ### Undo
 
 ```sh
-sudo ./i3-everforest-installer.sh --uninstall --keep-packages
+sudo ./i3-setup.sh --uninstall --keep-packages
 ```
 
 ---
@@ -147,7 +240,7 @@ Geometry and palette match the reference exactly: 34 px strip, 6 px top margin,
 `#2f3336`, text `#d3c6aa`, cream `#fffbef`, lime `#b9ff66`, launcher `#00ff00`,
 notifications `#7c7aff`, power `#fa3433`, JetBrains Mono 14 px / 700.
 
-Every constant carries the CSS rule it came from in `src/config.h`, so a value
+Every constant carries the CSS rule it came from in `src/i3/config.h`, so a value
 can be checked against the stylesheet without reading the drawing code.
 
 ### Transparency
@@ -557,35 +650,35 @@ Everything the script writes is listed above; nothing else is modified.
 ## Layout of this repository
 
 ```
-i3-everforest-installer.sh     the deliverable: one self-contained script
-build.sh                       reassembles the installer from src/ + assets/
-src/10-header.sh               palette, helpers, traps
-src/20-tui.sh                  the line-based English TUI
-src/30-preflight.sh            distro/user checks, manifest, backups
-src/40-packages.sh             apt handling
-src/50-theme.sh                GTK theme install
-src/55-icons.sh                icon theme install
-src/57-wallpaper.sh            wallpaper + icon font
-src/60-dotfiles.sh             every configuration file
-src/70-shell.sh                helpers: mf, bar actions, lock, power, prompt
-src/75-session.sh              xsessions entry + session launcher
-src/77-sddm.sh                 SDDM + SilentSDDM
-src/80-uninstall.sh            restore/remove logic
-src/85-payload.sh              embedded-asset reader
-src/90-main.sh                 argument parsing and orchestration
+i3-setup.sh                    the deliverable: one self-contained script
+src/build-i3.sh                reassembles the installer from src/i3/ + assets/
+src/i3/10-header.sh               palette, helpers, traps
+src/i3/20-tui.sh                  the line-based English TUI
+src/i3/30-preflight.sh            distro/user checks, manifest, backups
+src/i3/40-packages.sh             apt handling
+src/i3/50-theme.sh                GTK theme install
+src/i3/55-icons.sh                icon theme install
+src/i3/57-wallpaper.sh            wallpaper + icon font
+src/i3/60-dotfiles.sh             every configuration file
+src/i3/70-shell.sh                helpers: mf, bar actions, lock, power, prompt
+src/i3/75-session.sh              xsessions entry + session launcher
+src/i3/77-sddm.sh                 SDDM + SilentSDDM
+src/i3/80-uninstall.sh            restore/remove logic
+src/i3/85-payload.sh              embedded-asset reader
+src/i3/90-main.sh                 argument parsing and orchestration
 assets/                        the payload sources (theme, icons, wallpaper)
-assets/bar-c/src/              the C bar: config.h, bar.h, bar.c,
+assets/bar-i3/src/              the C bar: config.h, bar.h, bar.c,
                                modules.c, draw.c, tooltip.c, util.c
 assets/sddm/silent/            SilentSDDM theme (login background included)
 ```
 
-The numeric prefixes on `src/*.sh` are load-bearing: `build.sh` globs
+The numeric prefixes on `src/i3/*.sh` are load-bearing: `build-i3.sh` globs
 `10-*`, then `20-*`, `30-*`, `40-*`, `5*`, `6*`, `70-*`, `75-*`, `77-*`,
 `80-*`, `85-*`, `90-*` and concatenates them in that order. Functions must be
 defined before the file that calls them, so renaming these files without
 updating the glob breaks the build.
 
-`build.sh` concatenates `src/*.sh` in that order and appends the compressed
+`build-i3.sh` concatenates `src/i3/*.sh` in that order and appends the compressed
 assets as base64 blocks after `__I3_EVERFOREST_PAYLOAD_BELOW__`.
 
 The bar sources are compiled at install time (`libcairo2-dev`,
@@ -595,9 +688,9 @@ prebuilt binary and the result matches the target's ABI.
 ### Rebuilding
 
 ```sh
-./build.sh                                  # -> i3-everforest-installer.sh
-./i3-everforest-installer.sh --list         # sanity check
-bash -n i3-everforest-installer.sh          # syntax check
+./src/build-i3.sh                           # -> i3-setup.sh
+./i3-setup.sh --list         # sanity check
+bash -n i3-setup.sh          # syntax check
 ```
 
 ---

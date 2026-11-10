@@ -48,6 +48,7 @@
 #define ICON_MIN_W      22      /* min-width: 22px for ime/launcher/notifications */
 
 /* Radii that specific modules override. */
+#define R_LAUNCHER      13.0    /* box.mod-launcher { border-radius: 13px } */
 #define R_NOTIF         15.0    /* box.mod-notifications { border-radius: 15px } */
 #define R_POWER         10.0    /* box.mod-power { border-radius: 10px } */
 

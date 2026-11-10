@@ -31,6 +31,7 @@ typedef struct {
 	unsigned long cpu_last_ms;
 	double cpu_interval_ms;  /* measured gap between samples, see refresh_cpu */
 	int network_connected;
+	int network_is_wifi;   /* 1 = wireless link, 0 = wired/ethernet */
 	char clock[16];
 	char date[64];
 	/* Active-window title, cached.
@@ -151,6 +152,7 @@ void draw_text_in(Bar *b, int x, int y, int box_h, const char *text,
 void draw_text_n(Bar *b, int x, int y, const char *text, double size, int weight,
                  double r, double g, double bl);
 void draw_wifi(Bar *b, int x, int y, int w, int h, double r_top, double g_top, double bl_top, double r_mid, double g_mid, double bl_mid, double r_dot, double g_dot, double bl_dot);
+void draw_ethernet(Bar *b, int x, int y, int w, int h, double r, double g, double bl);
 void draw_feedback(Bar *b, int x, int y, int w, int h, double radius, double alpha);
 int text_width(Bar *b, const char *text);
 int text_width_sized(Bar *b, const char *text, double size, int weight);

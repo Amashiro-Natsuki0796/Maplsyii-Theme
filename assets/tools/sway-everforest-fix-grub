@@ -1,0 +1,352 @@
+#!/bin/sh
+# sway-everforest-fix-grub - repair GPU driver selection in the kernel cmdline.
+#
+# WHY THIS EXISTS
+#
+# The installer supports Intel, AMD and NVIDIA graphics out of the box and never
+# touches the kernel command line: a boot-level change that goes wrong leaves a
+# machine with no display, and that is not a risk an installer should take on the
+# user's behalf.
+#
+# One case does need it. The Wayland greeter runs under weston, and weston 16
+# refuses to start without DRM atomic modesetting:
+#
+#     Error: Kernel DRM KMS does not support DRM_CLIENT_CAP_ATOMIC.
+#     fatal: failed to create compositor backend
+#
+# SDDM has no fallback, so the screen stops at a flashing cursor. On AMD CIK
+# hardware (Kaveri and friends) the default radeon driver has no atomic support,
+# while amdgpu does, but only with Display Core forced on. This tool performs
+# that switch, and can undo it.
+#
+# USAGE
+#
+#     sudo sway-everforest-fix-grub              interactive
+#     sudo sway-everforest-fix-grub --status     show what is configured
+#     sudo sway-everforest-fix-grub --apply      radeon -> amdgpu (with dc=1)
+#     sudo sway-everforest-fix-grub --revert     restore the original cmdline
+#     sudo sway-everforest-fix-grub --perf on    pin the GPU to high performance
+#     sudo sway-everforest-fix-grub --perf off   back to automatic clocks
+#
+# Every change is idempotent and reversible; the original /etc/default/grub is
+# kept verbatim in the backup directory.
+set -u
+
+STATE_DIR="/var/lib/sway-everforest"
+GRUB_BACKUP="${STATE_DIR}/grub.default.bak"
+CLOCK_SERVICE="/etc/systemd/system/amdgpu-performance.service"
+
+# CIK needs both parameters: radeon must let go, amdgpu must take over, and DC
+# must be forced on because it is what provides atomic modesetting there.
+CIK_PARAMS="radeon.cik_support=0 amdgpu.cik_support=1 amdgpu.dc=1"
+
+say()  { printf '%s\n' "$*"; }
+hr()   { printf '%s\n' "----------------------------------------------------------"; }
+ok()   { printf '  \033[32m%s\033[0m\n' "$*"; }
+warn() { printf '  \033[33m%s\033[0m\n' "$*"; }
+err()  { printf '  \033[31m%s\033[0m\n' "$*" >&2; }
+
+need_root() {
+	[ "$(id -u)" -eq 0 ] || { err "run this as root (sudo)"; exit 1; }
+}
+
+# ---------------------------------------------------------------- probing ---
+
+# Print "vendor:driver:class" for every display controller.
+list_gpus() {
+	for d in /sys/bus/pci/devices/*; do
+		[ -r "$d/class" ] || continue
+		read -r cls <"$d/class" || continue
+		case "$cls" in
+			0x0300*|0x0302*) ;;
+			*) continue ;;
+		esac
+		[ -r "$d/vendor" ] || continue
+		read -r vend <"$d/vendor" || continue
+		drv=$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)
+		[ -n "$drv" ] || drv="-"
+		printf '%s:%s:%s\n' "$vend" "$drv" "$(basename "$d")"
+	done
+}
+
+vendor_name() {
+	case "$1" in
+		0x1002) echo "AMD" ;;
+		0x8086) echo "Intel" ;;
+		0x10de) echo "NVIDIA" ;;
+		*)      echo "unknown($1)" ;;
+	esac
+}
+
+has_atomic() {
+	python3 - /dev/dri/card0 <<'PY' 2>/dev/null
+import ctypes, ctypes.util, os, sys
+lib = ctypes.util.find_library("drm")
+if not lib:
+    sys.exit(1)
+drm = ctypes.CDLL(lib)
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    # DRM_CLIENT_CAP_ATOMIC = 3
+    sys.exit(0 if drm.drmSetClientCap(fd, 3, 1) == 0 else 1)
+finally:
+    os.close(fd)
+PY
+}
+
+# The display GPU that the greeter will use: class 0x0300, not the 3D-only one.
+primary_gpu() {
+	for d in /sys/bus/pci/devices/*; do
+		[ -r "$d/class" ] || continue
+		read -r cls <"$d/class" || continue
+		case "$cls" in 0x0300*) ;; *) continue ;; esac
+		[ -r "$d/vendor" ] || continue
+		read -r vend <"$d/vendor" || continue
+		drv=$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)
+		printf '%s:%s:%s\n' "$vend" "${drv:--}" "$(basename "$d")"
+		return 0
+	done
+	return 1
+}
+
+gpu_clock() {
+	f=$(cat /sys/class/drm/card0/device/hwmon/hwmon*/freq1_input 2>/dev/null | head -1)
+	[ -n "$f" ] && echo "$((f / 1000000)) MHz" || echo "n/a"
+}
+
+gpu_perf_level() {
+	cat /sys/class/drm/card0/device/power_dpm_force_performance_level 2>/dev/null || echo "n/a"
+}
+
+show_status() {
+	say "Kernel command line"
+	grep -E '^GRUB_CMDLINE_LINUX(_DEFAULT)?=' /etc/default/grub 2>/dev/null | sed 's/^/  /'
+	say ""
+
+	say "Running kernel"
+	tr ' ' '\n' </proc/cmdline | grep -E 'amdgpu|radeon|nomodeset' | sed 's/^/  /' ||
+		say "  (no graphics parameters)"
+	say ""
+
+	say "GPUs"
+	# Collected first, then printed. list_gpus writes several lines; piping it
+	# straight into `grep -q` closes the pipe early and the writer dies with
+	# SIGPIPE ("printf: I/O error").
+	gpu_list=$(list_gpus)
+	if [ -n "$gpu_list" ]; then
+		# A PCI slot looks like 0000:00:01.0, so splitting on ":" must keep
+		# everything from field 3 onward; -f3 alone would stop at "00".
+		primary_slot=$(primary_gpu 2>/dev/null | cut -d: -f3-)
+		printf '%s\n' "$gpu_list" | while IFS= read -r line; do
+			vend=$(printf '%s' "$line" | cut -d: -f1)
+			drv=$(printf '%s' "$line" | cut -d: -f2)
+			slot=$(printf '%s' "$line" | cut -d: -f3-)
+			mark=""
+			[ "$slot" = "$primary_slot" ] && mark="(display)"
+			printf '  %-8s %-12s %-14s %s\n' \
+				"$(vendor_name "$vend")" "$drv" "$slot" "$mark"
+		done
+	else
+		say "  none detected"
+	fi
+	say ""
+
+	if has_atomic; then
+		ok "DRM atomic modesetting: supported"
+	else
+		warn "DRM atomic modesetting: NOT supported"
+		say "    -> the Wayland greeter cannot start on this GPU"
+	fi
+	say ""
+
+	say "GPU clocks"
+	say "  performance level : $(gpu_perf_level)"
+	say "  current clock     : $(gpu_clock)"
+	if [ -f "$CLOCK_SERVICE" ]; then
+		say "  clock service     : $(systemctl is-enabled amdgpu-performance.service 2>/dev/null || echo unknown)"
+	fi
+	say ""
+
+	say "Backups"
+	if [ -f "$GRUB_BACKUP" ]; then
+		say "  ${GRUB_BACKUP}"
+		grep -E '^GRUB_CMDLINE_LINUX_DEFAULT=' "$GRUB_BACKUP" | sed 's/^/    /'
+	else
+		say "  (none yet - the first --apply creates one)"
+	fi
+}
+
+# ---------------------------------------------------------------- actions ---
+
+backup_grub() {
+	if [ -f "$GRUB_BACKUP" ]; then
+		say "  backup already exists: ${GRUB_BACKUP}"
+		return 0
+	fi
+	mkdir -p "$STATE_DIR"
+	cp -a /etc/default/grub "$GRUB_BACKUP"
+	ok "backed up /etc/default/grub -> ${GRUB_BACKUP}"
+}
+
+apply_amdgpu() {
+	say "Switching the display GPU from radeon to amdgpu"
+	say ""
+
+	pg=$(primary_gpu) || { err "no display controller found"; return 1; }
+	vend=$(printf '%s' "$pg" | cut -d: -f1)
+	drv=$(printf '%s' "$pg" | cut -d: -f2)   # PCI address follows, but these two
+	                                         # fields never contain a colon
+
+	if [ "$vend" != "0x1002" ]; then
+		err "the display GPU is $(vendor_name "$vend"), not AMD - nothing to switch"
+		return 1
+	fi
+	if [ "$drv" = "amdgpu" ]; then
+		ok "already on amdgpu; no change needed"
+		return 0
+	fi
+
+	backup_grub
+
+	if grep -q 'amdgpu.dc=1' /etc/default/grub 2>/dev/null; then
+		ok "kernel parameters already present"
+	else
+		sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"|GRUB_CMDLINE_LINUX_DEFAULT=\"\1 ${CIK_PARAMS}\"|" \
+			/etc/default/grub
+		if ! grep -q 'amdgpu.dc=1' /etc/default/grub; then
+			err "could not edit /etc/default/grub"
+			return 1
+		fi
+		ok "added to GRUB_CMDLINE_LINUX_DEFAULT: ${CIK_PARAMS}"
+	fi
+
+	say "  regenerating boot configuration..."
+	if ! update-grub >/tmp/fix-grub.log 2>&1; then
+		err "update-grub failed; see /tmp/fix-grub.log"
+		return 1
+	fi
+	ok "grub.cfg regenerated"
+	say ""
+	warn "A reboot is required for the new driver to take effect."
+	warn "If the machine does not reach a graphical session, boot into the"
+	warn "previous kernel from the GRUB menu and run: $0 --revert"
+	return 0
+}
+
+revert_all() {
+	if [ ! -f "$GRUB_BACKUP" ]; then
+		err "no backup at ${GRUB_BACKUP}; nothing to restore"
+		say "  To undo by hand: remove radeon.cik_support / amdgpu.cik_support /"
+		say "  amdgpu.dc from GRUB_CMDLINE_LINUX_DEFAULT in /etc/default/grub,"
+		say "  then run update-grub."
+		return 1
+	fi
+	cp -a "$GRUB_BACKUP" /etc/default/grub
+	ok "restored /etc/default/grub from backup"
+	if ! update-grub >/tmp/fix-grub.log 2>&1; then
+		err "update-grub failed; see /tmp/fix-grub.log"
+		return 1
+	fi
+	ok "grub.cfg regenerated"
+	warn "Reboot to return to the previous driver."
+	return 0
+}
+
+perf_on() {
+	if [ ! -e /sys/class/drm/card0/device/power_dpm_force_performance_level ]; then
+		err "this GPU exposes no performance level control"
+		return 1
+	fi
+	cat >"$CLOCK_SERVICE" <<'EOF'
+# Pin the GPU to its highest clock state.
+#
+# amdgpu on CIK (Kaveri) initialises DPM but never exports the frequency tables,
+# so the governor cannot pick a state on demand: the GPU jumps to ~520 MHz for
+# an instant under load and falls back to the 354 MHz floor.
+#
+# Cost: the GPU no longer idles down, so it draws full power and runs hot.
+[Unit]
+Description=Pin the AMD GPU to high performance
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Retry briefly: the service is ordered after udev-settle, but a slow disk or a
+# deferred amdgpu probe can still mean card0 has no hwmon entry yet when this
+# runs. Without the retry the loop below would match no file, succeed silently,
+# and leave the GPU at its floor clock with nothing in the journal to show it.
+ExecStart=/bin/sh -c 'for i in $(seq 1 50); do for f in /sys/class/drm/card*/device/power_dpm_force_performance_level; do [ -w "$f" ] && echo high > "$f" && exit 0; done; sleep 0.2; done; echo "no writable power_dpm_force_performance_level found" >&2; exit 1'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	systemctl daemon-reload
+	systemctl enable --now amdgpu-performance.service >/dev/null 2>&1
+	ok "GPU pinned to high performance (current clock: $(gpu_clock))"
+	return 0
+}
+
+perf_off() {
+	if systemctl list-unit-files amdgpu-performance.service >/dev/null 2>&1 &&
+	   systemctl is-enabled amdgpu-performance.service >/dev/null 2>&1; then
+		systemctl disable --now amdgpu-performance.service >/dev/null 2>&1
+		ok "clock service disabled"
+	fi
+	rm -f "$CLOCK_SERVICE"
+	echo auto >/sys/class/drm/card0/device/power_dpm_force_performance_level 2>/dev/null || true
+	systemctl daemon-reload
+	ok "GPU back to automatic clock management (current clock: $(gpu_clock))"
+	return 0
+}
+
+# ------------------------------------------------------------- interactive ---
+
+menu() {
+	show_status
+	hr
+	say "What would you like to do?"
+	say ""
+	say "  1) Switch radeon -> amdgpu (adds ${CIK_PARAMS})"
+	say "     Use this when the login screen stops at a flashing cursor."
+	say "  2) Pin the GPU to high performance"
+	say "     Use this when 3D applications run at roughly half speed."
+	say "  3) Restore the original kernel command line"
+	say "  4) Return the GPU to automatic clock management"
+	say "  5) Show status only"
+	say ""
+	printf 'Choice [1-5]: '
+	read -r choice
+
+	case "$choice" in
+		1) hr; apply_amdgpu ;;
+		2) hr; perf_on ;;
+		3) hr; revert_all ;;
+		4) hr; perf_off ;;
+		5) : ;;
+		*) err "invalid choice"; exit 1 ;;
+	esac
+}
+
+# ---------------------------------------------------------------- dispatch ---
+
+need_root
+
+case "${1:---interactive}" in
+	--status)  show_status ;;
+	--apply)   apply_amdgpu ;;
+	--revert)  revert_all ;;
+	--perf)
+		case "${2:-}" in
+			on)  perf_on ;;
+			off) perf_off ;;
+			*)   err "usage: $0 --perf on|off"; exit 1 ;;
+		esac
+		;;
+	--interactive) menu ;;
+	-h|--help)
+		sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+		;;
+	*) err "unknown option: $1 (try --help)"; exit 1 ;;
+esac

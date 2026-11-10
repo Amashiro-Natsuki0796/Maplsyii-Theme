@@ -1,4 +1,5 @@
 /* Window, event loop and layout. */
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -264,21 +265,79 @@ refresh_cpu(Bar *b)
 	prev_idle = idle;
 }
 
+/* Pick the link to show in the network pill.
+ *
+ * Reads /sys/class/net directly: nmcli would fork a process on every tick,
+ * which is long enough to be felt during a workspace switch.
+ *
+ * The interface is discovered, not hardcoded. The previous version opened
+ * "/sys/class/net/wlp4s0/operstate" by name, so on a machine without that
+ * wireless card the pill showed "disconnected" forever even on a working
+ * wired link.
+ *
+ * A device is wireless when it has a /sys/class/net/<if>/wireless directory;
+ * the numeric `type` field is not usable here, because some drivers report
+ * wlan interfaces as ARPHRD_ETHER. `carrier` is 1 only when a cable is
+ * actually plugged in and the link is up, which is what the icon should say.
+ */
 static void
 refresh_network(Bar *b)
 {
-	/* Read the interface state from sysfs: nmcli would fork a process on every
-	 * tick, which is long enough to be felt during a workspace switch. */
-	FILE *f = fopen("/sys/class/net/wlp4s0/operstate", "r");
-	char buf[32] = "";
+	DIR *d = opendir("/sys/class/net");
+	struct dirent *e;
+	int wifi_up = 0, wired_up = 0, saw_wifi = 0, saw_wired = 0;
 
-	if (!f) {
-		b->st.network_connected = 0;
+	b->st.network_connected = 0;
+	b->st.network_is_wifi = 1;
+
+	if (!d)
 		return;
+
+	while ((e = readdir(d)) != NULL) {
+		char path[256], buf[32] = "";
+		int is_wifi, up;
+		FILE *f;
+
+		if (e->d_name[0] == '.' || strcmp(e->d_name, "lo") == 0)
+			continue;
+
+		snprintf(path, sizeof path, "/sys/class/net/%s/wireless", e->d_name);
+		is_wifi = access(path, F_OK) == 0;
+
+		snprintf(path, sizeof path, "/sys/class/net/%s/carrier", e->d_name);
+		f = fopen(path, "r");
+		if (!f)
+			continue;
+		if (fgets(buf, sizeof buf, f))
+			buf[strcspn(buf, "\n")] = '\0';
+		fclose(f);
+		up = buf[0] == '1';
+
+		if (is_wifi) {
+			saw_wifi = 1;
+			if (up)
+				wifi_up = 1;
+		} else {
+			saw_wired = 1;
+			if (up)
+				wired_up = 1;
+		}
 	}
-	if (fgets(buf, sizeof buf, f))
-		b->st.network_connected = strncmp(buf, "up", 2) == 0;
-	fclose(f);
+	closedir(d);
+
+	/* Preference: a live wireless link, then a live wired one. When neither is
+	 * up, show whichever hardware exists - the icon then communicates "no
+	 * connection" in the right shape. */
+	if (wifi_up || (saw_wifi && !saw_wired)) {
+		b->st.network_is_wifi = 1;
+		b->st.network_connected = wifi_up;
+	} else if (wired_up || saw_wired) {
+		b->st.network_is_wifi = 0;
+		b->st.network_connected = wired_up;
+	} else {
+		b->st.network_is_wifi = 1;
+		b->st.network_connected = 0;
+	}
 }
 
 void

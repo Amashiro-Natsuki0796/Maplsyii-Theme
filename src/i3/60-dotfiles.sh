@@ -209,7 +209,6 @@ for_window [class="^i3-everforest-bar-c$"] sticky enable
 #     returns.
 exec_always --no-startup-id sh -c 'pgrep -f "/usr/local/bin/i3-everforest-bar$" >/dev/null 2>&1 || /usr/local/bin/i3-everforest-bar &'
 exec --no-startup-id i3-everforest-border
-exec --no-startup-id i3-everforest-wifi-cache
 exec --no-startup-id i3-everforest-idle
 I3CONF
 	install_user_file "${cfg}" 644 <"${tmp}"

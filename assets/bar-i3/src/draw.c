@@ -227,3 +227,59 @@ draw_wifi(Bar *b, int x, int y, int w, int h, double r_top, double g_top,
 	cairo_fill(cr);
 	(void)h;
 }
+
+/* Wired-network symbol: an RJ45 socket with a plug seated in it.
+ *
+ * The port is the wide rectangle; the small block above it is the connector
+ * going in. That reads as "Ethernet" at 18px in a way a bare socket does not,
+ * because the plug gives the shape a direction - the eye sees something being
+ * inserted rather than an empty box.
+ *
+ * Drawn in the same 18x14 box the wifi arcs occupy, so the pill keeps its width
+ * and the bar's right-hand layout does not shift with the hardware present.
+ */
+void
+draw_ethernet(Bar *b, int x, int y, int w, int h,
+              double r, double g, double bl)
+{
+	cairo_t *cr = b->cr;
+	double cx = x + w / 2.0;
+	double bw = w * 0.86;               /* port width */
+	double bh = h * 0.56;               /* port height */
+	double bx = cx - bw / 2.0;
+	double by = y + h * 0.30;           /* port sits low, plug above it */
+	double nw = bw * 0.30;              /* latch notch width */
+	double nd = bh * 0.34;              /* latch notch depth */
+	double pw = bw * 0.42;              /* plug width */
+	double ph = h * 0.22;               /* plug height */
+
+	cairo_set_source_rgb(cr, r, g, bl);
+	cairo_set_line_width(cr, 1.5);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+
+	/* Port opening. */
+	cairo_new_path(cr);
+	cairo_rectangle(cr, bx, by, bw, bh);
+	cairo_stroke(cr);
+
+	/* Latch notch on the bottom edge. */
+	cairo_new_path(cr);
+	cairo_move_to(cr, cx - nw / 2, by + bh);
+	cairo_line_to(cr, cx - nw / 2, by + bh - nd);
+	cairo_line_to(cr, cx + nw / 2, by + bh - nd);
+	cairo_line_to(cr, cx + nw / 2, by + bh);
+	cairo_stroke(cr);
+
+	/* Plug seated above the port. */
+	cairo_new_path(cr);
+	cairo_rectangle(cr, cx - pw / 2, by - ph, pw, ph);
+	cairo_stroke(cr);
+
+	/* Its two contacts. */
+	cairo_new_path(cr);
+	cairo_move_to(cr, cx - pw * 0.22, by);
+	cairo_line_to(cr, cx - pw * 0.22, by - ph * 0.5);
+	cairo_move_to(cr, cx + pw * 0.22, by);
+	cairo_line_to(cr, cx + pw * 0.22, by - ph * 0.5);
+	cairo_stroke(cr);
+}

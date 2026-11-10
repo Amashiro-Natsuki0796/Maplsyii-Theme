@@ -1,0 +1,308 @@
+# 50-theme.sh
+# ---------------------------------------------------------------------
+# =====================================================================
+#  GTK theme  (Everforest-Dark-BL-LB)
+# ---------------------------------------------------------------------
+#  Order of preference:
+#    1. the payload bundled in this file (exact palette, no network)
+#    2. a local build from the upstream sassc sources
+#    3. an already-installed Everforest theme, renamed (last resort)
+# =====================================================================
+
+THEME_INSTALLED=0
+
+theme_install_bundled() {
+	local src="${ASSET_DIR}/gtk-theme/${THEME_NAME}"
+	if [[ -d "${src}/gtk-3.0" ]]; then
+		rm -rf "/usr/share/themes/${THEME_NAME}"
+		install -d /usr/share/themes
+		cp -a "${src}" "/usr/share/themes/${THEME_NAME}"
+		ui_ok "theme installed from the bundled payload"
+		return 0
+	fi
+	return 1
+}
+
+theme_build_from_source() {
+	have sassc || return 1
+	local tarball="${TMPWORK}/everforest-gtk.tar.gz" src="${TMPWORK}/everforest-gtk" out="${TMPWORK}/gtk-out"
+
+	if [[ -d "${ASSET_DIR:-}/theme-src/themes" ]]; then
+		mkdir -p "${src}"
+		cp -a "${ASSET_DIR}/theme-src/." "${src}/"
+	else
+		ui_step "downloading the theme sources"
+		curl -fsSL --retry 2 --retry-delay 2 --connect-timeout 15 \
+			-o "${tarball}" "${THEME_SRC_URL}" >>"${LOG_FILE}" 2>&1 || return 1
+		tar tzf "${tarball}" >/dev/null 2>&1 || return 1
+		mkdir -p "${src}"
+		tar xzf "${tarball}" -C "${src}" --strip-components=1 >>"${LOG_FILE}" 2>&1 || return 1
+	fi
+
+	mkdir -p "${out}"
+	(
+		cd "${src}/themes" && ./install.sh -d "${out}" -c dark -t default --tweaks
+	) >>"${LOG_FILE}" 2>&1 || return 1
+
+	local built="${out}/Everforest-Dark"
+	[[ -d "${built}" ]] || return 1
+	rm -rf "/usr/share/themes/${THEME_NAME}"
+	cp -a "${built}" "/usr/share/themes/${THEME_NAME}"
+	ui_ok "theme compiled from source"
+	return 0
+}
+
+theme_install_from_archive() {
+	ui_warn "falling back to an already-installed Everforest theme (palette may differ)"
+	local cand
+	for cand in /usr/share/themes/Everforest-Dark /usr/share/themes/Everforest-BL-LB-Dark; do
+		[[ -d "${cand}" ]] || continue
+		rm -rf "/usr/share/themes/${THEME_NAME}"
+		cp -a "${cand}" "/usr/share/themes/${THEME_NAME}"
+		ui_ok "copied $(basename "${cand}") into ${THEME_NAME}"
+		return 0
+	done
+	return 1
+}
+
+theme_install() {
+	ui_hdr "GTK theme"
+	local dest="/usr/share/themes/${THEME_NAME}"
+
+	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
+		ui_dim "would install ${dest}"
+		return 0
+	fi
+
+	if [[ -e "${dest}" ]]; then
+		backup_path "${dest}"
+		rm -rf "${dest}"
+	fi
+
+	if theme_install_bundled || theme_build_from_source || theme_install_from_archive; then
+		:
+	else
+		ui_err "could not obtain the GTK theme"
+		return 1
+	fi
+
+	# Keep index.theme in sync with the directory name we install to.
+	if [[ -f "${dest}/index.theme" ]]; then
+		sed -i "s/^Name=.*/Name=${THEME_NAME}/" "${dest}/index.theme"
+		sed -i "s/^GtkTheme=.*/GtkTheme=${THEME_NAME}/" "${dest}/index.theme"
+		sed -i "s/^MetacityTheme=.*/MetacityTheme=${THEME_NAME}/" "${dest}/index.theme"
+		sed -i "s/^IconTheme=.*/IconTheme=${ICON_NAME}/" "${dest}/index.theme"
+	fi
+	manifest_dir "${dest}"
+	THEME_INSTALLED=1
+	ui_ok "installed ${dest}"
+
+	# GTK4 / libadwaita: the theme's gtk-4.0 stylesheet must live in the
+	# user's config directory for libadwaita applications to see it.
+	local g4="${HOME_DIR}/.config/gtk-4.0" f
+	if [[ -d "${dest}/gtk-4.0" ]]; then
+		mkdir -p "${g4}"
+		for f in assets gtk.css gtk-dark.css; do
+			if [[ -e "${g4}/${f}" && ! -L "${g4}/${f}" ]]; then
+				backup_path "${g4}/${f}"
+				rm -rf "${g4}/${f}"
+			fi
+			ln -sfn "${dest}/gtk-4.0/${f}" "${g4}/${f}"
+			register_file "${g4}/${f}"
+		done
+		chown_user "${g4}"
+		ui_ok "libadwaita override linked into ~/.config/gtk-4.0"
+	fi
+}
+
+gtk_apply_settings() {
+	local g3="${HOME_DIR}/.config/gtk-3.0"
+	mkdir -p "${g3}"
+
+	local s3="${g3}/settings.ini"
+	if [[ -f "${s3}" ]]; then backup_path "${s3}"; fi
+	cat >"${s3}" <<EOF
+[Settings]
+gtk-theme-name=${THEME_NAME}
+gtk-icon-theme-name=${ICON_NAME}
+gtk-font-name=JetBrains Mono 10
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-application-prefer-dark-theme=1
+gtk-menu-images=1
+gtk-button-images=1
+gtk-enable-event-sounds=1
+gtk-enable-input-feedback-sounds=0
+gtk-xft-antialias=1
+gtk-xft-hinting=1
+gtk-xft-hintstyle=hintslight
+gtk-xft-rgba=rgb
+EOF
+	register_file "${s3}"
+
+	local g4dir="${HOME_DIR}/.config/gtk-4.0"
+	local s4="${g4dir}/settings.ini"
+	mkdir -p "${g4dir}"
+	if [[ -f "${s4}" ]]; then backup_path "${s4}"; fi
+	cat >"${s4}" <<EOF
+[Settings]
+gtk-theme-name=${THEME_NAME}
+gtk-icon-theme-name=${ICON_NAME}
+gtk-font-name=JetBrains Mono 10
+gtk-cursor-theme-name=Adwaita
+gtk-cursor-theme-size=24
+gtk-application-prefer-dark-theme=1
+gtk-xft-antialias=1
+gtk-xft-hinting=1
+gtk-xft-hintstyle=hintslight
+gtk-xft-rgba=rgb
+EOF
+	register_file "${s4}"
+
+	local g2="${HOME_DIR}/.gtkrc-2.0"
+	if [[ -f "${g2}" ]]; then backup_path "${g2}"; fi
+	cat >"${g2}" <<EOF
+# Everforest - generated by ${PROG}
+gtk-theme-name="${THEME_NAME}"
+gtk-icon-theme-name="${ICON_NAME}"
+gtk-font-name="JetBrains Mono 10"
+gtk-cursor-theme-name="Adwaita"
+gtk-cursor-theme-size=24
+gtk-toolbar-style=GTK_TOOLBAR_ICONS
+EOF
+	register_file "${g2}"
+
+	local themes_dir="${HOME_DIR}/.themes"
+	mkdir -p "${themes_dir}"
+	if [[ ! -e "${themes_dir}/${THEME_NAME}" ]]; then
+		ln -sfn "/usr/share/themes/${THEME_NAME}" "${themes_dir}/${THEME_NAME}"
+		register_file "${themes_dir}/${THEME_NAME}"
+	fi
+
+	chown_user "${g3}" "${g4dir}" "${g2}" "${themes_dir}"
+
+	# Desktop-wide settings for portal / GNOME-adjacent applications.
+	if have gsettings; then
+		as_user dbus-run-session -- gsettings set org.gnome.desktop.interface gtk-theme "${THEME_NAME}" 2>/dev/null || true
+		as_user dbus-run-session -- gsettings set org.gnome.desktop.interface icon-theme "${ICON_NAME}" 2>/dev/null || true
+		as_user dbus-run-session -- gsettings set org.gnome.desktop.interface color-scheme "prefer-dark" 2>/dev/null || true
+		as_user dbus-run-session -- gsettings set org.gnome.desktop.interface font-name "JetBrains Mono 10" 2>/dev/null || true
+	fi
+	ui_ok "GTK settings applied (${THEME_NAME} + ${ICON_NAME})"
+}
+
+# ---------------------------------------------------------------------
+#  Theme guard
+# ---------------------------------------------------------------------
+#  Other appearance tools (COSMIC settings ports, GNOME tweaks, desktop
+#  environment daemons) rewrite ~/.config/gtk-*/settings.ini when the user
+#  flips a light/dark switch, and each of them overwrites gtk-theme-name and
+#  sometimes drops gtk-icon-theme-name entirely. That silently breaks the rice
+#  until the installer is run again.
+#
+#  This installs a tiny script plus a systemd user timer that puts the four
+#  keys back if they drift, so the desktop self-heals after such a change.
+theme_guard_install() {
+	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
+		ui_dim "would install the theme guard (restores the theme after light/dark switches)"
+		return 0
+	fi
+
+	local guard="${HOME_DIR}/.local/bin/sway-everforest-theme-guard"
+	mkdir -p "${HOME_DIR}/.local/bin"
+	cat >"${guard}" <<'GUARD'
+#!/bin/sh
+# Put the Everforest theme keys back if another tool overwrote them.
+# Usage: sway-everforest-theme-guard [--quiet]
+theme="${SWAY_EVERFOREST_THEME:-__THEME__}"
+icons="${SWAY_EVERFOREST_ICONS:-__ICONS__}"
+changed=0
+
+fix_one() {
+	dir="$1"
+	[ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || return 0
+	f="$dir/settings.ini"
+	[ -f "$f" ] || : >"$f"
+
+	cur_theme=$(sed -n 's/^gtk-theme-name=//p' "$f" 2>/dev/null | head -1)
+	cur_icon=$(sed -n 's/^gtk-icon-theme-name=//p' "$f" 2>/dev/null | head -1)
+
+	[ "$cur_theme" = "$theme" ] && [ "$cur_icon" = "$icons" ] && return 0
+
+	tmp=$(mktemp) || return 0
+	# keep every other key the other tool wrote, replace only ours
+	grep -v -e '^gtk-theme-name=' -e '^gtk-icon-theme-name=' "$f" >"$tmp" 2>/dev/null || : >"$tmp"
+	case "$(head -1 "$tmp" 2>/dev/null)" in
+	'[Settings]') : ;;
+	*) sed -i '1i [Settings]' "$tmp" 2>/dev/null || printf '[Settings]\n' | cat - "$tmp" >"$tmp.2" && mv "$tmp.2" "$tmp" ;;
+	esac
+	printf 'gtk-theme-name=%s\ngtk-icon-theme-name=%s\n' "$theme" "$icons" >>"$tmp"
+	mv "$tmp" "$f"
+	changed=1
+	return 0
+}
+
+fix_one "$HOME/.config/gtk-3.0"
+fix_one "$HOME/.config/gtk-4.0"
+
+# gsettings is what a running GTK desktop actually follows, and it can drift
+# from settings.ini independently (a settings panel may write one but not the
+# other). Sync it every run, not only when a file had to be repaired.
+if command -v gsettings >/dev/null 2>&1; then
+	cur_gt=$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null | tr -d "'")
+	cur_ic=$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'")
+	[ "$cur_gt" = "$theme" ] || { gsettings set org.gnome.desktop.interface gtk-theme "$theme" 2>/dev/null && changed=1; }
+	[ "$cur_ic" = "$icons" ] || { gsettings set org.gnome.desktop.interface icon-theme "$icons" 2>/dev/null && changed=1; }
+fi
+
+if [ "$changed" -eq 1 ]; then
+	[ "${1:-}" = "--quiet" ] || echo "theme keys restored"
+fi
+exit 0
+GUARD
+	sed -i "s|__THEME__|${THEME_NAME}|; s|__ICONS__|${ICON_NAME}|" "${guard}"
+	chmod 755 "${guard}"
+	register_file "${guard}"
+
+	# Run it on login and every 10 minutes, so a light/dark toggle is undone
+	# without the user having to re-run the installer.
+	local unit_dir="${HOME_DIR}/.config/systemd/user"
+	mkdir -p "${unit_dir}"
+	cat >"${unit_dir}/sway-everforest-theme-guard.service" <<EOF
+[Unit]
+Description=Restore the Everforest theme keys
+
+[Service]
+Type=oneshot
+ExecStart=${guard} --quiet
+EOF
+	cat >"${unit_dir}/sway-everforest-theme-guard.timer" <<EOF
+[Unit]
+Description=Re-apply the Everforest theme keys periodically
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+	register_file "${unit_dir}/sway-everforest-theme-guard.service"
+	register_file "${unit_dir}/sway-everforest-theme-guard.timer"
+	chown_user "${HOME_DIR}/.local/bin" 2>/dev/null || true
+	chown_user "${unit_dir}" 2>/dev/null || true
+
+	# Enable it for the login session when systemd is available.
+	if [[ -d /run/systemd/system ]]; then
+		as_user systemctl --user daemon-reload >/dev/null 2>&1 || true
+		as_user systemctl --user enable --now sway-everforest-theme-guard.timer \
+			>/dev/null 2>&1 || ui_dim "enable the theme guard manually: systemctl --user enable --now sway-everforest-theme-guard.timer"
+	fi
+
+	# Fix the current state immediately.
+	as_user "${guard}" >/dev/null 2>&1 || "${guard}" >/dev/null 2>&1 || true
+	ui_ok "theme guard installed (restores the theme after light/dark switches)"
+	return 0
+}
+
+# ---------------------------------------------------------------------

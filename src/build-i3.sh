@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  build.sh - assemble the single-file installer from src/*.sh plus the
+#  build-i3.sh - assemble the single-file installer from src/i3/*.sh plus the
 #  asset payload (icons, GTK theme, wallpaper, fonts, SDDM theme).
 #
-#  Run from the project root:   ./build.sh
-#  Output:                      ./i3-everforest-installer.sh
+#  Run from anywhere:            src/build-i3.sh
+#  Output:                       i3-setup.sh in the project root
 # =====================================================================
 set -Eeuo pipefail
-cd "$(dirname "$0")"
 
-OUT="i3-everforest-installer.sh"
-SRC="src"
-BUILD=".build"
+# This script lives in src/, so the project root is its parent. Anchoring on the
+# root rather than the script directory keeps the installer, the staging
+# directory and assets/ in one predictable place no matter where the script is
+# invoked from.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+OUT="i3-setup.sh"
+SRC="src/i3"
+BUILD=".build-i3"
 ASSETS="assets"
 
 THEME_NAME="Everforest-Dark-BL-LB"
@@ -82,7 +88,7 @@ else
 fi
 
 # ---- bar config (opacity preset, module order) ----------------------
-BAR_SRC="${BAR_SRC:-$ASSETS/bar}"
+BAR_SRC="${BAR_SRC:-$ASSETS/bar-config}"
 if [[ -d "$BAR_SRC" ]]; then
 	echo "    bar config: $BAR_SRC"
 	tar -C "$(dirname "$BAR_SRC")" -cf - "$(basename "$BAR_SRC")" | xz -T0 -9e >"$BUILD/payload/bar.tar.xz"
@@ -92,7 +98,7 @@ else
 fi
 
 # ---- bar sources (C, compiled at install time) ----------------------
-BAR_C_SRC="${BAR_C_SRC:-$ASSETS/bar-c}"
+BAR_C_SRC="${BAR_C_SRC:-$ASSETS/bar-i3}"
 if [[ -d "$BAR_C_SRC" ]]; then
 	echo "    bar sources: $BAR_C_SRC"
 	tar -C "$(dirname "$BAR_C_SRC")" -cf - "$(basename "$BAR_C_SRC")" | xz -T0 -9e >"$BUILD/payload/bar-c.tar.xz"

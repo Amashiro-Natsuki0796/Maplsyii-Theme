@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Record notification bodies so the history menu can show what they said.
+
+WHY THIS EXISTS
+
+The notification history menu is built from "makoctl history", but mako only
+exposes a notification's summary, app name and urgency. The body is accepted
+over D-Bus and then dropped, so the menu could never show what a notification
+actually said - opening one showed only its title.
+
+The body does exist on the bus: it is the fifth string argument of the
+org.freedesktop.Notifications.Notify method call. dbus-monitor can observe
+that call without owning the notification name, so this process mirrors what
+it sees into a log and leaves mako completely untouched.
+
+DESIGN NOTES
+
+dbus-monitor is used rather than python-dbus message filters because a filter
+only sees messages addressed to the calling connection, and mako owns the
+name. Monitoring the bus is the supported way to observe another client's
+method calls.
+
+Each dbus-monitor record is a "method call" header line followed by the
+arguments, printed one per line with strings quoted. A body containing
+newlines is printed across several physical lines inside one quoted string,
+which is why the parser tracks whether it is inside a string rather than
+counting lines.
+
+The log is one record per line, tab separated:
+
+    <epoch>\t<app>\t<summary>\t<body with newlines escaped as \\n>
+"""
+
+import os
+import subprocess
+import sqlite3
+import sys
+import time
+
+STATE_DIR = os.path.join(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+    "sway-everforest",
+)
+LOG_PATH = os.path.join(STATE_DIR, "notifications.log")
+
+MAX_RECORDS = 500
+MAX_BYTES = 512 * 1024
+
+MONITOR_FILTER = (
+    "interface='org.freedesktop.Notifications',member='Notify'"
+)
+
+
+def unescape(value: str) -> str:
+    """Undo dbus-monitor's C-style escaping of a printed string."""
+    out = []
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch == "\\" and i + 1 < len(value):
+            nxt = value[i + 1]
+            mapping = {
+                "n": "\n",
+                "t": "\t",
+                "r": "\r",
+                '"': '"',
+                "\\": "\\",
+            }
+            if nxt in mapping:
+                out.append(mapping[nxt])
+                i += 2
+                continue
+            # Unknown escape: keep both characters, do not lose data.
+            out.append(ch)
+            out.append(nxt)
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def escape_field(value: str) -> str:
+    """Flatten a value onto one log line."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("\t", " ")
+        .replace("\r", " ")
+        .replace("\n", "\\n")
+    )
+
+
+class NotifyParser:
+    """Turn dbus-monitor's line-oriented output into notification records."""
+
+    STRING_PREFIX = '   string "'
+
+    def __init__(self, emit):
+        self.emit = emit
+        self.armed = False          # inside a Notify call
+        self.strings = []           # completed string arguments
+        self.in_string = False
+        self.buffer = []            # physical lines of the current string
+
+    def feed(self, line: str) -> None:
+        line = line.rstrip("\n")
+
+        if line.startswith("method call") and line.endswith("member=Notify"):
+            # A new Notify call: flush the previous one first.
+            self._finish_call()
+            self.armed = True
+            self.strings = []
+            self.in_string = False
+            self.buffer = []
+            return
+
+        # Any other message boundary ends the call's argument list. Without
+        # this the strings of an unrelated signal (NameAcquired carries two
+        # bus names) were counted as Notify arguments and shifted every field.
+        if self.armed and (line.startswith("method call")
+                           or line.startswith("signal ")
+                           or line.startswith("method return")
+                           or line.startswith("error ")):
+            self._finish_call()
+            return
+
+        if not self.armed:
+            return
+
+        if self.in_string:
+            # Continuation of a multi-line string.
+            if line.endswith('"') and line.count('"') % 2 == 1:
+                self.buffer.append(line[:-1])
+                self.strings.append(unescape("\n".join(self.buffer)))
+                self.buffer = []
+                self.in_string = False
+                if len(self.strings) == 4:
+                    self._finish_call()
+            else:
+                self.buffer.append(line)
+            return
+
+        if line.startswith(self.STRING_PREFIX):
+            payload = line[len(self.STRING_PREFIX):]
+            if payload.endswith('"') and payload.count('"') % 2 == 1:
+                self.strings.append(unescape(payload[:-1]))
+                # Notify's four plain strings are app, icon, summary, body. The
+                # body is the last thing this tool needs, and waiting for the
+                # next message as an end-of-arguments marker would drop the
+                # final notification of a session. Emit as soon as it arrives.
+                if len(self.strings) == 4:
+                    self._finish_call()
+            else:
+                self.buffer = [payload]
+                self.in_string = True
+            return
+
+        # A non-string argument after the argument list means the call's
+        # arguments are complete; emission happens on the next call header so
+        # a multi-line body has a chance to arrive first.
+
+    def _finish_call(self) -> None:
+        if not self.armed:
+            return
+        if self.in_string:
+            # Unterminated: keep what we have rather than dropping the record.
+            self.strings.append(unescape("\n".join(self.buffer)))
+            self.in_string = False
+            self.buffer = []
+
+        # Notify(app_name, replaces_id, app_icon, summary, body, actions,
+        #        hints, timeout) - the string arguments are therefore:
+        #   0 app_name, 1 app_icon, 2 summary, 3 body
+        # (replaces_id is a uint32 and actions is a string array whose
+        # contents come later, so counting only plain "string" lines gives
+        # these four in order.)
+        app = self.strings[0] if len(self.strings) > 0 else ""
+        summary = self.strings[2] if len(self.strings) > 2 else ""
+        body = self.strings[3] if len(self.strings) > 3 else ""
+
+        if summary or body:
+            self.emit(app, summary, body)
+
+        self.strings = []
+        self.armed = False
+
+
+def append_record(app: str, summary: str, body: str) -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    record = "\t".join(
+        [str(int(time.time())), escape_field(app), escape_field(summary),
+         escape_field(body)]
+    )
+    with open(LOG_PATH, "a", encoding="utf-8") as fh:
+        fh.write(record + "\n")
+    _trim()
+
+
+def _trim() -> None:
+    try:
+        size = os.path.getsize(LOG_PATH)
+    except OSError:
+        return
+    if size <= MAX_BYTES:
+        # Still check the line count, which can matter for many tiny records.
+        with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            if sum(1 for _ in fh) <= MAX_RECORDS:
+                return
+    with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+    keep = lines[-MAX_RECORDS:]
+    tmp = LOG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.writelines(keep)
+    os.replace(tmp, LOG_PATH)
+
+
+def main() -> int:
+    env = dict(os.environ)
+    # dbus-monitor needs the session bus; a compositor session always has it.
+    proc = subprocess.Popen(
+        ["dbus-monitor", "--session", MONITOR_FILTER],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=env,
+        text=True,
+        bufsize=1,
+    )
+    parser = NotifyParser(append_record)
+    assert proc.stdout is not None
+    try:
+        dbg = os.environ.get("NOTIFY_LOG_DEBUG")
+        dbgfh = open(dbg, "a", encoding="utf-8") if dbg else None
+        # readline() rather than "for line in stdout": the iterator form reads
+        # ahead in blocks, so a live monitor stream would sit in the buffer
+        # until the pipe filled and no record would ever be written.
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            if dbgfh:
+                dbgfh.write(line)
+                dbgfh.flush()
+            parser.feed(line)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        proc.terminate()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
