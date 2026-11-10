@@ -62,8 +62,15 @@ assets_unpack_from_self() {
 		tar -xJf "${dir}/sddm-theme.tar.xz" -C "${dir}/sddm" 2>/dev/null || ui_warn "the SDDM theme payload is damaged"
 	fi
 	if [[ -f "${dir}/bar-wl.tar.xz" ]]; then
-		mkdir -p "${dir}/bar-wl"
-		tar -xJf "${dir}/bar-wl.tar.xz" -C "${dir}/bar-wl" 2>/dev/null || ui_warn "the C bar payload is damaged"
+		# Extracted straight into ${dir}, not into ${dir}/bar-wl.
+		#
+		# The archive already contains the bar-sway/ directory, so adding
+		# another level would produce assets/bar-wl/bar-sway/ - a path that
+		# only exists when running from the packaged payload. A source checkout
+		# passes SCRIPT_ASSET_DIR=./assets instead, where the tree is
+		# assets/bar-sway/ with no wrapper, and the two layouts have to match or
+		# the bar cannot be found in one of them.
+		tar -xJf "${dir}/bar-wl.tar.xz" -C "${dir}" 2>/dev/null || ui_warn "the C bar payload is damaged"
 	fi
 	if [[ -f "${dir}/wallpaper.jpg.xz" ]]; then
 		xz -dc "${dir}/wallpaper.jpg.xz" >"${dir}/wallpaper.jpg" 2>/dev/null || ui_warn "wallpaper payload is damaged"

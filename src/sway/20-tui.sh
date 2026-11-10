@@ -38,12 +38,12 @@ tui_w() {
 
 opt_short() {
 	case "$1" in
-	core) printf 'Desktop core    sway, waybar, foot, wofi, mako, swaybg' ;;
+	core) printf 'Desktop core    sway, C bar, foot, wofi, mako, swaybg' ;;
 	apps) printf 'Everyday apps   pcmanfm, btop, pavucontrol, grim, slurp, wlogout' ;;
 	theme) printf 'GTK theme       Everforest-Dark-BL-LB (+ libadwaita override)' ;;
 	icons) printf 'Icon theme      Material-Black-Lime-Numix-FLAT' ;;
 	wall) printf 'Wallpaper       wallhaven 4xxw9z, 1920x1080' ;;
-	dots) printf 'Dotfiles        sway, waybar, foot, wofi, mako, swaylock' ;;
+	dots) printf 'Dotfiles        sway, bar, foot, wofi, mako, swaylock' ;;
 	session) printf 'Login session   wayland-sessions entry for sway' ;;
 	shell) printf 'Shell extras    mf fetch block + Everforest bash prompt' ;;
 	sddm) printf 'SDDM greeter    display manager + SilentSDDM theme' ;;

@@ -223,7 +223,7 @@ write_bar() {
 	# The sources ship inside this installer and are compiled at install time,
 	# so the target machine needs no source tree afterwards.
 	local dir="${HOME_DIR}/.config/i3-everforest"
-	local src="${ASSET_DIR}/bar-c"
+	local src="${ASSET_DIR}/bar-i3"
 	local build
 	mkdir -p "${dir}"
 
@@ -265,9 +265,9 @@ write_bar() {
 	[[ -n "${opacity}" ]] || opacity="solid"
 
 	local tmp; tmp="$(mktemp)"
-	if [[ -f "${ASSET_DIR}/bar/bar.json" ]]; then
+	if [[ -f "${ASSET_DIR}/bar-config/bar.json" ]]; then
 		sed -e "s|\"opacity\": *\"[a-z]*\"|\"opacity\": \"${opacity}\"|" \
-			"${ASSET_DIR}/bar/bar.json" >"${tmp}"
+			"${ASSET_DIR}/bar-config/bar.json" >"${tmp}"
 	fi
 	install_user_file "${dir}/bar.json" 644 <"${tmp}"
 	rm -f "${tmp}"

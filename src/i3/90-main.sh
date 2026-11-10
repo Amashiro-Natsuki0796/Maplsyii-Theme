@@ -306,11 +306,23 @@ validate_install() {
 			i3 -C -c "${HOME_DIR}/.config/i3/config" >"${i3log}" 2>&1; then
 			ui_ok "i3 config is valid"
 		else
+			# i3's exit status covers more than config parsing: it also fails
+			# when it cannot chdir to the current directory, which happens
+			# whenever the caller sits somewhere the target user cannot read -
+			# a root-owned home during an automated install, or a chroot. Those
+			# are environment complaints, not broken configuration, so they are
+			# filtered out and only genuine parser errors fail the check.
 			local real_errors
-			real_errors="$(grep -iE 'error|invalid|expected|could not|unknown' "${i3log}" 2>/dev/null | head -8)"
-			ui_err "i3 reported configuration problems:"
-			printf '%s\n' "${real_errors:-$(head -5 "${i3log}" 2>/dev/null)}" | sed 's/^/      /'
-			ok=0
+			real_errors="$(grep -iE 'error|invalid|expected|could not|unknown' "${i3log}" 2>/dev/null \
+				| grep -ivE 'chdir\(.*\) failed|Permission denied' \
+				| head -8)"
+			if [[ -z "${real_errors}" ]]; then
+				ui_ok "i3 config is valid"
+			else
+				ui_err "i3 reported configuration problems:"
+				printf '%s\n' "${real_errors}" | sed 's/^/      /'
+				ok=0
+			fi
 		fi
 	fi
 
@@ -441,12 +453,14 @@ print_summary() {
 	fi
 	# Reload the bar so settings that are read at startup (the transparency
 	# preset, bar.json layout) take effect without a logout.
-	if [[ ${OPT_DRY_RUN} -eq 0 ]] && command -v ps >/dev/null 2>&1; then
-		if ps -eo args= 2>/dev/null | grep -qx "python3 /usr/local/bin/i3-everforest-bar"; then
-			ps -eo pid,args --no-headers 2>/dev/null |
-				awk '$0 ~ /^ *[0-9]+ python3 \/usr\/local\/bin\/i3-everforest-bar$/ {print $1}' |
-				while read -r pid; do kill "${pid}" 2>/dev/null || true; done
-			# The watchdog brings it back within a few seconds.
+	if [[ ${OPT_DRY_RUN} -eq 0 ]] && command -v pgrep >/dev/null 2>&1; then
+		# The bar is a compiled binary, launched as a bare path. This used to
+		# match "python3 /usr/local/bin/i3-everforest-bar" - the form from
+		# before the C rewrite - so it never fired and a reinstall left the old
+		# bar running with the old settings.
+		if pgrep -f "/usr/local/bin/i3-everforest-bar$" >/dev/null 2>&1; then
+			pkill -f "/usr/local/bin/i3-everforest-bar$" 2>/dev/null || true
+			# The sway/i3 exec_always watchdog brings it back within seconds.
 			ui_dim "restarting the bar so the new settings apply"
 		fi
 	fi

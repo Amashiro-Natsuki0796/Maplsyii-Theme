@@ -63,20 +63,104 @@ bar_cairo_setup(Bar *b)
 	b->cr = cairo_create(b->surface);
 }
 
-/* Bar transparency. $BAR_WL_OPACITY accepts soft/clear/solid, matching the
- * presets the i3 rice writes into bar.json. */
+/* Map a preset name to its alpha, or -1 when the name is not one we know. */
+static double
+opacity_from_name(const char *name)
+{
+	if (!name || !*name)
+		return -1.0;
+	if (strcmp(name, "soft") == 0)
+		return OPACITY_SOFT;
+	if (strcmp(name, "clear") == 0)
+		return OPACITY_CLEAR;
+	if (strcmp(name, "solid") == 0)
+		return OPACITY_SOLID;
+	return -1.0;
+}
+
+/* Bar transparency, in order of precedence:
+ *
+ *   1. $BAR_WL_OPACITY            - per-run override, useful for testing
+ *   2. ~/.config/i3-everforest/bar.conf  - what the installer writes
+ *   3. OPACITY_SOLID               - the default
+ *
+ * The config file matters: the installer has always written "opacity=soft"
+ * (or clear/solid) there, but this function used to read the environment
+ * only, so the file was written and never read and the choice never reached
+ * the bar. Reading it here is what makes the three-way setting do anything.
+ *
+ * The file is a tiny key=value list, so it is parsed line by line rather than
+ * pulled in through a config library. Comments and blank lines are skipped,
+ * and only the "opacity" key is looked at.
+ */
 static double
 load_opacity(void)
 {
 	const char *env = getenv("BAR_WL_OPACITY");
+	double from_env = opacity_from_name(env);
 
-	if (env && *env) {
-		if (strcmp(env, "soft") == 0)
-			return OPACITY_SOFT;
-		if (strcmp(env, "clear") == 0)
-			return OPACITY_CLEAR;
+	if (from_env >= 0.0)
+		return from_env;
+
+	{
+		const char *home = getenv("HOME");
+		char path[512];
+		FILE *fp;
+
+		if (!home || !*home)
+			return OPACITY_SOLID;
+
+		if (snprintf(path, sizeof path, "%s/.config/i3-everforest/bar.conf",
+		             home) >= (int)sizeof path)
+			return OPACITY_SOLID;
+
+		fp = fopen(path, "r");
+		if (!fp)
+			return OPACITY_SOLID;
+
+		{
+			char line[256];
+			double result = OPACITY_SOLID;
+
+			while (fgets(line, sizeof line, fp)) {
+				char *p = line;
+
+				while (*p == ' ' || *p == '\t')
+					p++;
+				if (*p == '#' || *p == '\n' || *p == '\0')
+					continue;
+
+				if (strncmp(p, "opacity", 7) != 0)
+					continue;
+				p += 7;
+				while (*p == ' ' || *p == '\t')
+					p++;
+				if (*p != '=')
+					continue;
+				p++;
+				while (*p == ' ' || *p == '\t')
+					p++;
+
+				/* Trim the trailing newline so the name compares equal. */
+				{
+					char *end = p;
+					while (*end && *end != '\n')
+						end++;
+					*end = '\0';
+				}
+
+				{
+					double v = opacity_from_name(p);
+					if (v >= 0.0) {
+						result = v;
+						break;
+					}
+				}
+			}
+			fclose(fp);
+			return result;
+		}
 	}
-	return OPACITY_SOLID;
 }
 
 /* =====================  state refresh  ================================= */

@@ -151,13 +151,13 @@ MFSCRIPT
 }
 
 write_stats() {
-	# Tiny helper for the waybar "launcher" module: prints
+	# Tiny helper for the bar's "launcher" module: prints
 	# "NN% MEM · NN% CPU" so the pill shows live figures without waybar
 	# having to run a shell pipeline of its own.
 	local dest="/usr/local/bin/sway-everforest-stats"
 	cat >"${dest}" <<'STATS'
 #!/bin/sh
-# Memory and CPU usage for the waybar launcher pill.
+# Memory and CPU usage for the launcher pill.
 mem=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%d", (t-a)*100/t}' /proc/meminfo 2>/dev/null)
 # Instantaneous CPU load: sample /proc/stat twice 0.3s apart and use the
 # delta. Reading it once gives the average since boot, which barely moves and
@@ -584,7 +584,7 @@ CPUG
 	# Compiled here rather than shipped as a binary, so it links against the
 	# libwayland/cairo/pango the target actually has.
 	bar_wl_build() {
-		local src="${ASSET_DIR}/bar-wl/bar-wl"
+		local src="${ASSET_DIR}/bar-sway"
 		local build=/usr/local/src/i3-everforest-bar-wl
 
 		[[ -d "${src}" ]] || { ui_err "the C bar payload is missing"; return 1; }
@@ -1402,7 +1402,7 @@ write_volume() {
 	local dest="/usr/local/bin/sway-everforest-volume"
 	{
 		printf '%s\n' '#!/bin/sh'
-		printf '%s\n' '# Speaker and microphone level for the waybar volume pill.'
+		printf '%s\n' '# Speaker and microphone level for the bar volume pill.'
 		printf '%s\n' 'command -v pactl >/dev/null 2>&1 || { printf "\\uf026 n/a\\n"; exit 0; }'
 		printf '%s\n' ''
 		printf '%s\n' 'sink=$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -o "[0-9]\\+%" | head -1)'

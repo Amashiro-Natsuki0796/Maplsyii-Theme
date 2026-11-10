@@ -64,12 +64,12 @@ OPT_USER=""
 OPT_APT_UPDATE=1
 OPT_ASSUME_TUI="auto"
 
-CORE=1        # desktop packages (sway, waybar, alacritty, wofi, ...)
+CORE=1        # desktop packages (sway, the C bar, foot, wofi, ...)
 APPS=1        # file manager, system monitor, media, power menu, ...
 GTK_THEME=1   # Everforest GTK theme + GTK3/GTK4/libadwaita settings
 ICONS=1       # Material-Black-Lime-Numix-FLAT icon theme
 WALLPAPER=1   # wallpaper
-DOTS=1        # sway/waybar/alacritty/wofi/mako/swaylock/btop configs
+DOTS=1        # sway/bar/foot/wofi/mako/swaylock/btop configs
 SESSION=1     # wayland-sessions entry (login from a display manager)
 SHELLFX=1     # "mf" fetch script + Everforest bash prompt
 SDDM=1        # SDDM display manager + SilentSDDM theme

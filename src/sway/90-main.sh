@@ -14,12 +14,12 @@ USAGE
   sudo ./$(basename "${SELF}") --dry-run       preview only, change nothing
 
 COMPONENTS
-  core      sway, waybar, foot, wofi, mako, swaybg, swaylock, swayidle
+  core      sway, C bar, foot, wofi, mako, swaybg, swaylock, swayidle
   apps      pcmanfm, btop, pavucontrol, grim, slurp, wlogout, cliphist, swappy
   theme     GTK2/3/4 Everforest-Dark-BL-LB + libadwaita override
   icons     Material-Black-Lime-Numix-FLAT
   wall      wallpaper from wallhaven (4xxw9z), 1920x1080
-  dots      sway, waybar, foot, wofi, mako, swaylock, btop configs
+  dots      sway, bar, foot, wofi, mako, swaylock, btop configs
   session   /usr/share/wayland-sessions entry for sway
   sddm      SDDM display manager + SilentSDDM theme (graphical login)
   shell     the 'mf' fetch block + Everforest bash prompt
@@ -29,7 +29,7 @@ OPTIONS
       --user NAME         desktop user (default: the sudo invoker)
   -n, --dry-run           show what would be done, change nothing
       --no-tui            never ask questions (same as a non-interactive run)
-      --opacity LEVEL     waybar transparency: solid (default), soft, clear
+      --opacity LEVEL     bar transparency: solid (default), soft, clear
       --no-apt-update     do not refresh the package lists
 
   Skip one component:
@@ -86,7 +86,7 @@ apps     pcmanfm gvfs btop fastfetch pavucontrol network-manager-gnome
 theme    ${THEME_NAME} (GTK2/3/4) + gtk-3.0/gtk-4.0/libadwaita settings
 icons    ${ICON_NAME}
 wall     wallhaven 4xxw9z -> ~/.local/share/${SHARE_DIR_NAME}/wallpaper.jpg
-dots     sway, waybar, alacritty, wofi, mako, swaylock, btop
+dots     sway, bar, foot, wofi, mako, swaylock, btop
 session  /usr/share/wayland-sessions/${SESSION_FILE}
 sddm     SDDM + SilentSDDM theme -> ${SDDM_THEME_DIR}, boots to graphical.target
 shell    /usr/local/bin/mf + Everforest bash prompt
@@ -209,7 +209,7 @@ install_flow() {
 	if [[ ${SDDM} -eq 1 ]]; then sddm_install || ui_warn "the display manager could not be configured"; fi
 	if [[ ${SHELLFX} -eq 1 ]]; then
 		if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
-			ui_dim "would install /usr/local/bin/mf, the waybar stats helper and the bash prompt"
+			ui_dim "would install /usr/local/bin/mf, the bar stats helper and the bash prompt"
 		else
 			write_mf; write_stats; write_volume; write_brightness; write_sysinfo
 			write_bar_actions; write_picker; write_bash_extras
@@ -305,12 +305,25 @@ validate_install() {
 		fi
 	fi
 
-	# waybar config is JSONC; strip full-line comments and parse with jq
-	if [[ -f "${HOME_DIR}/.config/waybar/config.jsonc" ]] && have jq; then
-		if sed 's:^[[:space:]]*//.*$::' "${HOME_DIR}/.config/waybar/config.jsonc" | jq -e . >/dev/null 2>&1; then
-			ui_ok "waybar config is valid JSON"
+	# The bar is the native Wayland C program, so the thing worth verifying is
+	# that the binary exists and can be launched at all - not a waybar JSONC
+	# file. This used to check ~/.config/waybar/config.jsonc, which stopped
+	# being written when the C bar replaced waybar; a leftover file from an
+	# older install then failed the check for a bar the session no longer uses.
+	if [[ -x /usr/local/bin/i3-everforest-bar-wl ]]; then
+		ui_ok "C bar binary present: /usr/local/bin/i3-everforest-bar-wl"
+	elif [[ ${CORE} -eq 1 ]]; then
+		ui_err "the C bar binary is missing"; ok=0
+	fi
+
+	# The opacity file is the only bar preference the installer writes, and it
+	# is worthless if unreadable: the bar parses it at startup.
+	if [[ -f "${HOME_DIR}/.config/i3-everforest/bar.conf" ]]; then
+		if grep -qE '^opacity=(solid|soft|clear)$' \
+			"${HOME_DIR}/.config/i3-everforest/bar.conf"; then
+			ui_ok "bar opacity file is valid"
 		else
-			ui_err "waybar config is not valid JSON"; ok=0
+			ui_warn "bar opacity file has no usable opacity= line"
 		fi
 	fi
 
@@ -364,7 +377,7 @@ print_summary() {
 	ui_dim "  Mod+Escape  lock screen     Print        screenshot"
 	printf '\n'
 	ui_line "Files:"
-	ui_dim "  configs   ${HOME_DIR}/.config/{sway,waybar,alacritty,wofi,mako,swaylock}"
+	ui_dim "  configs   ${HOME_DIR}/.config/{sway,foot,wofi,mako,swaylock,i3-everforest}"
 	ui_dim "  wallpaper ${HOME_DIR}/.local/share/${SHARE_DIR_NAME}/wallpaper.jpg"
 	ui_dim "  manifest  ${MANIFEST}"
 	ui_dim "  log       ${LOG_FILE}"
