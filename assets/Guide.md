@@ -1,4 +1,4 @@
-# i3 Everforest — one-shot installer for Debian 13
+# Maplsyii-Theme — one-shot installer for Debian 13
 
 Reproduces the desktop from
 [\[Sway\] - Everforest](https://plus.diolinux.com.br/t/sway-everforest/63254)
@@ -91,6 +91,125 @@ cd assets/bar-sway && make
 There is **no Waybar fallback**: if the build fails the installer stops. A bar
 is not optional, and silently swapping in a different one would hide the
 failure behind a UI that looks almost right.
+
+---
+
+## GPU driver selection: `sway-everforest-fix-grub`
+
+The installer **never touches the kernel command line.** That is deliberate: a
+wrong driver switch leaves a machine with no display, and that is not a risk an
+installer should take on the user's behalf. It supports Intel, NVIDIA and AMD
+out of the box and leaves `radeon`/`amdgpu`/`i915` selection alone.
+
+One case does need a change. The Wayland greeter runs under weston, and weston
+16 refuses to start without DRM atomic modesetting:
+
+```
+Error: Kernel DRM KMS does not support DRM_CLIENT_CAP_ATOMIC.
+fatal: failed to create compositor backend
+```
+
+SDDM has no fallback, so the screen stops at a flashing cursor. On AMD CIK
+hardware (Kaveri and friends) the default `radeon` driver has no atomic support,
+while `amdgpu` does — but only with Display Core forced on. A separate tool
+performs that switch when you ask for it:
+
+```sh
+sudo sway-everforest-fix-grub              # interactive menu
+sudo sway-everforest-fix-grub --status     # show the current state
+sudo sway-everforest-fix-grub --apply      # radeon -> amdgpu (adds dc=1)
+sudo sway-everforest-fix-grub --revert     # restore the original cmdline
+sudo sway-everforest-fix-grub --perf on    # pin the GPU to high performance
+sudo sway-everforest-fix-grub --perf off   # back to automatic clocks
+```
+
+`--status` reports what it can see and is safe to run any time:
+
+```
+GPUs
+  AMD      amdgpu       0000:00:01.0   (display)
+  NVIDIA   nvidia       0000:01:00.0
+
+DRM atomic modesetting: supported
+
+GPU clocks
+  performance level : high
+  current clock     : 910 MHz
+  clock service     : enabled
+```
+
+It detects hardware through `/sys` (PCI class + vendor + bound driver), not by
+guessing from names, and probes atomic support with the kernel's own
+`drmSetClientCap` ioctl rather than inferring it. The first `--apply` backs up
+`/etc/default/grub` verbatim to `/var/lib/sway-everforest/`, so `--revert`
+always works.
+
+### Why the GPU clock service exists
+
+`amdgpu` on CIK initialises DPM but never exports the frequency tables
+(`pp_dpm_sclk` is empty), so the governor cannot pick a state on demand: the GPU
+jumps to ~520 MHz for an instant under load and falls straight back to the
+354 MHz floor. Games run at roughly half speed.
+
+`--perf on` installs `amdgpu-performance.service`, which pins the performance
+level to `high` at boot (~910 MHz). The cost is real — the GPU stops idling down,
+so it draws full power and runs hot — which is why it is opt-in and reversible.
+
+---
+
+## Notification history with bodies
+
+The notifications pill lists past notifications and shows the full text of the
+one you pick. That needed more than a menu: mako only ever exposes a
+notification's **summary**, app name and urgency, so `makoctl history` cannot
+say what a notification actually said.
+
+The body does exist on the bus — it is the fifth string argument of
+`org.freedesktop.Notifications.Notify`. `sway-everforest-notify-log` watches
+that call with `dbus-monitor` and mirrors it into
+`~/.local/state/sway-everforest/notifications.log`:
+
+```
+<epoch>\t<app>\t<summary>\t<body, newlines escaped as \n>
+```
+
+It is a pure observer: it does not own the notification name, so mako is
+untouched and popups behave exactly as before. `dbus-monitor` is used rather
+than a python-dbus filter because a filter only sees messages addressed to the
+calling connection, and mako owns the name.
+
+The log is capped at 500 records / 512 KB. Clearing the history runs
+`makoctl dismiss --all` and truncates the log together.
+
+---
+
+## Bar transparency
+
+`--opacity soft|clear|solid` writes `~/.config/i3-everforest/bar.conf`:
+
+```ini
+# opacity: solid | soft | clear
+opacity=soft
+```
+
+The bar reads that file at startup, in this order of precedence:
+
+1. `$BAR_WL_OPACITY` — per-run override, handy for testing
+2. `~/.config/i3-everforest/bar.conf` — what the installer writes
+3. `solid` — the default
+
+The presets are `solid` (1.00), `soft` (0.82) and `clear` (0.35).
+
+---
+
+## Launcher without nested menus
+
+The launcher runs `wofi --show drun --no-actions`. Without `--no-actions`, wofi
+builds a secondary action menu for every `.desktop` file that declares
+`Actions=` — browsers ship several (new window, private window, profile
+manager) — so a right click opened a nested list on top of the application list.
+`--no-actions` is a global wofi switch, so it covers every application, not just
+the ones that happen to declare actions today.
 
 ---
 
@@ -481,6 +600,45 @@ no way to *choose* the i3 session. The **sddm** component fixes that end to end:
 `--uninstall` puts the previous display manager back (both the
 `display-manager.service` symlink and `/etc/X11/default-display-manager`) and
 restores the previous default target.
+
+### The sway variant runs the greeter on Wayland
+
+The i3 rice keeps the greeter on X11 because the session it logs into is X11 and
+can share that X server. The sway rice does the opposite: the greeter runs under
+a kiosk-mode weston, which exits once the session starts.
+
+The difference is large and measurable:
+
+| | X11 greeter | Wayland greeter |
+|---|---|---|
+| Xorg | ~90 MB, resident all session | none |
+| Greeter (Qt6 QML) | ~206 MB, resident all session | 0 after login (weston exits) |
+| sddm + helper | ~9 MB | ~21 MB |
+| **total** | **~307 MB** | **~21 MB** |
+
+That is a 93% reduction, and it is the single biggest memory win in this rice.
+
+It is not unconditional. weston 16 requires DRM atomic modesetting, and a
+machine without it would stop at a flashing cursor — SDDM has no fallback. So
+the installer probes the GPU before choosing:
+
+```sh
+if sddm_gpu_has_atomic; then
+    greeter_backend="wayland"
+    greeter_compositor="weston --shell=kiosk --idle-time=0"
+else
+    greeter_backend="x11"
+    ui_warn "greeter backend: x11 (GPU lacks DRM atomic modesetting)"
+fi
+```
+
+The probe asks the kernel directly (`drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC,
+1)`) rather than guessing from the driver name, because some drivers expose
+atomic only with extra module parameters — `amdgpu` on CIK needs `amdgpu.dc=1`,
+which is what `sway-everforest-fix-grub --apply` sets.
+
+`CompositorCommand` is written out explicitly even though kiosk mode is SDDM's
+default, so a distribution drop-in cannot change the behaviour silently.
 
 ### Why a bare `libpam-systemd` matters
 
