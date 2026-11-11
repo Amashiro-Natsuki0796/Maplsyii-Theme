@@ -52,6 +52,24 @@ generated next to this README, and no build artifacts are kept in the repository
 
 ## Quick start
 
+### Prerequisites
+
+The installer pulls in everything else itself, but the build toolchain and the
+development headers used to compile the two C programs (`i3-everforest-bar` and
+`st` on X11, `i3-everforest-bar-wl` on Wayland) are worth installing up front.
+On a stock Debian 13 image `make`, `cc` and `patch` are not guaranteed to be
+present, and `st` needs the Xft/fontconfig headers that the package lists do not
+name:
+
+```sh
+sudo apt install -y build-essential pkg-config patch \
+                    libx11-dev libxft-dev libfontconfig1-dev \
+                    libcairo2-dev libpango1.0-dev
+```
+
+Skip it and the bar build stops the install (there is no fallback bar), while
+`st` only prints a warning and the desktop ends up without a terminal.
+
 Interactive runs first show a three-way action menu:
 
 ```
