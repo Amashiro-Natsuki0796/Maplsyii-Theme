@@ -495,6 +495,7 @@ tui_summary() {
 	[[ ${SOFT_VLC:-0} -eq 1 ]] && extra+="vlc "
 	[[ ${SOFT_OBS:-0} -eq 1 ]] && extra+="obs "
 	[[ ${SOFT_FCITX:-0} -eq 1 ]] && extra+="fcitx5 "
+	[[ ${SOFT_OSK:-0} -eq 1 ]] && extra+="osk "
 	row="  extra software: ${extra:-none}"
 	printf '%s│%s%-*s%s│%s\n' "${C_LIME}" "${C_RESET}${C_GREY}" "${inner}" "${row}" "${C_LIME}" "${C_RESET}"
 	printf '%s╰%s╯%s\n' "${C_LIME}" "$(tui_hline '─' "${inner}")" "${C_RESET}"
@@ -510,11 +511,12 @@ tui_summary() {
 #  Third page: extra software
 # ---------------------------------------------------------------------
 #  OPT keys for the optional applications. Each entry is "key|label|hint".
-OPT_SOFT_KEYS=( zennb vlc obs fcitx )
+OPT_SOFT_KEYS=( zennb vlc obs fcitx osk )
 SOFT_ZENNB=0
 SOFT_VLC=0
 SOFT_OBS=0
 SOFT_FCITX=0
+SOFT_OSK=0
 
 soft_state() {
 	case "$1" in
@@ -522,6 +524,7 @@ soft_state() {
 	vlc)   [[ ${SOFT_VLC} -eq 1 ]] && printf 'x' || printf ' ' ;;
 	obs)   [[ ${SOFT_OBS} -eq 1 ]] && printf 'x' || printf ' ' ;;
 	fcitx) [[ ${SOFT_FCITX} -eq 1 ]] && printf 'x' || printf ' ' ;;
+	osk)   [[ ${SOFT_OSK} -eq 1 ]] && printf 'x' || printf ' ' ;;
 	esac
 }
 
@@ -532,6 +535,7 @@ soft_set() {
 	vlc)   SOFT_VLC=${v} ;;
 	obs)   SOFT_OBS=${v} ;;
 	fcitx) SOFT_FCITX=${v} ;;
+	osk)   SOFT_OSK=${v} ;;
 	esac
 }
 
@@ -541,6 +545,7 @@ soft_short() {
 	vlc)   printf 'VLC            media player' ;;
 	obs)   printf 'OBS Studio     screen recording and streaming' ;;
 	fcitx) printf 'fcitx5         Chinese pinyin input method' ;;
+	osk)   printf 'Screen keyboard wvkbd: on-screen keyboard for touch and pointer' ;;
 	esac
 }
 
@@ -550,6 +555,7 @@ soft_desc() {
 	vlc)   printf 'Plays almost every audio and video format.' ;;
 	obs)   printf 'Wayland capture; needs the portal for screen access.' ;;
 	fcitx) printf 'Includes fcitx5-chinese-addons (pinyin) and the Qt/GTK modules.' ;;
+	osk)   printf 'Accessibility: 800 KB, one package. Toggled from the bar IME menu.' ;;
 	esac
 }
 
@@ -586,7 +592,7 @@ tui_soft_render() {
 	printf '\n  %s%s%s\n' "${C_GREY}" "$(tui_hline '─' 68)" "${C_RESET}"
 	printf '  %sselected:%s %s/%s\n' "${C_GREY}" "${C_RESET}" "$(soft_count)" "${#OPT_SOFT_KEYS[@]}"
 	printf '\n'
-	local -a hints=( "1-4:toggle" "a:all" "n:none" "Enter:continue" "b:back" )
+	local -a hints=( "1-5:toggle" "a:all" "n:none" "Enter:continue" "b:back" )
 	local hint="" pair keyk desc
 	for pair in "${hints[@]}"; do
 		keyk="${pair%%:*}"; desc="${pair#*:}"
@@ -611,13 +617,13 @@ tui_soft_menu() {
 			return 2
 			;;
 		a|A|all)
-			SOFT_ZENNB=1; SOFT_VLC=1; SOFT_OBS=1; SOFT_FCITX=1
+			SOFT_ZENNB=1; SOFT_VLC=1; SOFT_OBS=1; SOFT_FCITX=1; SOFT_OSK=1
 			;;
 		n|N|none)
-			SOFT_ZENNB=0; SOFT_VLC=0; SOFT_OBS=0; SOFT_FCITX=0
+			SOFT_ZENNB=0; SOFT_VLC=0; SOFT_OBS=0; SOFT_FCITX=0; SOFT_OSK=0
 			;;
 		*)
-			if [[ "${input}" =~ ^[1-4]+$ ]]; then
+			if [[ "${input}" =~ ^[1-5]+$ ]]; then
 				local ch idx
 				for ((ch = 0; ch < ${#input}; ch++)); do
 					idx=$(( ${input:ch:1} - 1 ))
@@ -969,7 +975,7 @@ install_packages() {
 # ---------------------------------------------------------------------
 install_optional_software() {
 	local any=0
-	[[ ${SOFT_ZENNB:-0} -eq 1 || ${SOFT_VLC:-0} -eq 1 || ${SOFT_OBS:-0} -eq 1 || ${SOFT_FCITX:-0} -eq 1 ]] && any=1
+	[[ ${SOFT_ZENNB:-0} -eq 1 || ${SOFT_VLC:-0} -eq 1 || ${SOFT_OBS:-0} -eq 1 || ${SOFT_FCITX:-0} -eq 1 || ${SOFT_OSK:-0} -eq 1 ]] && any=1
 	[[ ${any} -eq 1 ]] || return 0
 
 	ui_hdr "Optional software"
@@ -992,6 +998,14 @@ install_optional_software() {
 	fi
 	if [[ ${SOFT_ZENNB:-0} -eq 1 ]]; then
 		install_zen_browser || ui_warn "Zen Browser could not be installed"
+	fi
+	if [[ ${SOFT_OSK:-0} -eq 1 ]]; then
+		# Accessibility on-screen keyboard. wvkbd is the only one worth
+		# installing here: 800 KB, a single package, and it links nothing but
+		# libwayland-client plus cairo/pango which the bar already needs.
+		# squeekboard pulls 4 packages and 26 MB, onboard pulls 119 and
+		# maliit-keyboard 105 MB - all of them far heavier for the same job.
+		apt_install "wvkbd" wvkbd || ui_warn "wvkbd could not be installed"
 	fi
 	return 0
 }
@@ -3961,17 +3975,41 @@ do_config() {
 	ver=""
 	have_fcitx && ver=$(fcitx5 --version 2>/dev/null | head -1)
 
+	# On-screen keyboard state. wvkbd is a plain process with no IPC, so the
+	# process table is the state. It is reported here rather than on the bar
+	# proper because it is an accessibility toggle, not something that needs
+	# to be visible at a glance.
+	osk_bin=""
+	for c in wvkbd-mobintl wvkbd; do
+		command -v "$c" >/dev/null 2>&1 && { osk_bin="$c"; break; }
+	done
+	if [ -z "${osk_bin}" ]; then
+		osk_state="not installed"
+	elif pgrep -f "$(basename "${osk_bin}")" >/dev/null 2>&1; then
+		osk_state="on"
+	else
+		osk_state="off"
+	fi
+
 	info="Framework : ${fw}
 State     : ${state_txt}
 Current   : $(pretty "${cur:-none}")
 Enabled   : ${ims:-none}
 Hotkey    : ${hotkey}
-Version   : ${ver:-n/a}"
+Version   : ${ver:-n/a}
+On-screen : ${osk_state}"
 
 	menu="Switch input method
 Restart fcitx5
 Open fcitx5 settings
-Reload configuration
+Reload configuration"
+	case "${osk_state}" in
+	on)             menu="${menu}
+Turn off screen keyboard" ;;
+	off)            menu="${menu}
+Turn on screen keyboard" ;;
+	esac
+	menu="${menu}
 Close"
 
 	# wofi has no -mesg equivalent, so the state goes into the prompt line.
@@ -4004,6 +4042,18 @@ Close"
 		fcitx5-remote -r >/dev/null 2>&1 || fcitx5-remote -o >/dev/null 2>&1
 		pkill -USR1 -x fcitx5 2>/dev/null
 		say "Configuration reloaded" 2000 0
+		;;
+	Turn\ on*|Turn\ off*)
+		# Delegated to the toggle tool so the logic lives in one place.
+		if command -v sway-everforest-osk >/dev/null 2>&1; then
+			sway-everforest-osk >/dev/null 2>&1
+			if pgrep -f "$(basename "${osk_bin}")" >/dev/null 2>&1; then
+				say "Screen keyboard on" 1500 0
+			else
+				say "Screen keyboard off" 1500 0
+			fi
+		fi
+		say "Screen keyboard tool is missing" 3000 1
 		;;
 	esac
 	exit 0
@@ -4424,6 +4474,68 @@ if __name__ == "__main__":
 NOTIFYLOG
 	chmod 755 /usr/local/bin/sway-everforest-notify-log
 	register_file /usr/local/bin/sway-everforest-notify-log
+	return 0
+}
+
+write_osk_toggle() {
+	# Toggle the on-screen keyboard.
+	#
+	# wvkbd is a wlroots keyboard layer: it is spawned as its own surface and
+	# stays until killed, so "toggle" is just start/stop. Bound to Mod+Shift+K
+	# in the sway config, but it also works from a terminal.
+	#
+	# The binary is only present when the accessibility component was chosen at
+	# install time; the binding stays quiet instead of erroring in that case.
+	cat >/usr/local/bin/sway-everforest-osk <<'OSK'
+#!/bin/sh
+# sway-everforest-osk - show/hide the on-screen keyboard (wvkbd)
+#
+#   sway-everforest-osk          toggle
+#   sway-everforest-osk show     start it if it is not running
+#   sway-everforest-osk hide     stop it
+#
+# wvkbd is a single process with no IPC, so the process table is the state.
+
+BIN="$(command -v wvkbd-mobintl || command -v wvkbd)"
+if [ -z "${BIN}" ]; then
+	command -v notify-send >/dev/null 2>&1 &&
+		notify-send -a Everforest -t 3000 "Screen keyboard" 			"wvkbd is not installed (choose it in the installer's optional software page)"
+	exit 1
+fi
+
+# Height only: wvkbd sizes itself from a layer-shell surface anchored to both
+# edges and exposes no width option, so height is the one dimension that can be
+# tuned. 200px still fits the full four-row layout without clipping the top row
+# and covers about a fifth of a 900px screen.
+#
+# Colours are left at wvkbd's own defaults on purpose: an Everforest palette was
+# tried and made the keyboard look foreign next to the rest of the rice, so the
+# stock look wins here.
+WVKBD_ARGS="-L 200 -H 200"
+
+running() {
+	pgrep -f "$(basename "${BIN}")" >/dev/null 2>&1
+}
+
+case "${1:-toggle}" in
+show)
+	running || setsid "${BIN}" ${WVKBD_ARGS} >/dev/null 2>&1 &
+	;;
+hide)
+	pkill -f "$(basename "${BIN}")" 2>/dev/null || true
+	;;
+toggle|*)
+	if running; then
+		pkill -f "$(basename "${BIN}")" 2>/dev/null || true
+	else
+		setsid "${BIN}" ${WVKBD_ARGS} >/dev/null 2>&1 &
+	fi
+	;;
+esac
+exit 0
+OSK
+	chmod 755 /usr/local/bin/sway-everforest-osk
+	register_file /usr/local/bin/sway-everforest-osk
 	return 0
 }
 
@@ -6182,6 +6294,7 @@ install_flow() {
 		else
 			write_fix_grub || true
 			write_notify_log || true
+			write_osk_toggle || true
 		fi
 	fi
 

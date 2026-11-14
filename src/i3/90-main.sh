@@ -235,6 +235,17 @@ install_flow() {
 		fi
 	fi
 
+	# The on-screen keyboard toggle is independent of the shell extras: it is
+	# bound to a key in the i3 config and has to exist whenever a bar or the
+	# session does, otherwise Mod+Shift+K reports a missing command.
+	if [[ ${DOTS} -eq 1 ]]; then
+		if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
+			ui_dim "would install /usr/local/bin/i3-everforest-osk"
+		else
+			write_osk_toggle || true
+		fi
+	fi
+
 	if [[ ${GTK_THEME} -eq 1 || ${ICONS} -eq 1 ]]; then
 		if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
 			ui_dim "would apply the GTK settings"

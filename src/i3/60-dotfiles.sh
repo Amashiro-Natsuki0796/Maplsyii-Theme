@@ -198,6 +198,19 @@ exec --no-startup-id xwallpaper --zoom "$wall"
 for_window [class="^i3-everforest-bar-c$"] floating enable, border none
 for_window [class="^i3-everforest-bar-c$"] move position 0 px 0 px
 for_window [class="^i3-everforest-bar-c$"] sticky enable
+
+# The on-screen keyboard is a normal window, so i3 can move it - but only when
+# it is floating and on top. Without these rules a freshly mapped onboard lands
+# where the previous focus left it and can end up behind the terminal it is
+# supposed to type into.
+#
+# `sticky enable` keeps it on every workspace (an accessibility tool that
+# vanishes when the user switches desktop is useless), and `focus` is
+# deliberately absent: dragging must not steal keyboard focus from the text
+# field, or the click would type into the keyboard's own window.
+for_window [class="^onboard$"] floating enable
+for_window [class="^onboard$"] sticky enable
+for_window [class="^onboard$"] border normal
 # exec_always, not exec: a plain `exec` runs once per i3 *start*, so
 # `i3-msg restart` left the desktop with no bar at all. exec_always re-runs on
 # every reload, which is what makes the bar come back after a reload.

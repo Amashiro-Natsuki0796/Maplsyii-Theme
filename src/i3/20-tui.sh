@@ -318,6 +318,7 @@ tui_summary() {
 	[[ ${SOFT_VLC:-0} -eq 1 ]] && extra+="vlc "
 	[[ ${SOFT_OBS:-0} -eq 1 ]] && extra+="obs "
 	[[ ${SOFT_FCITX:-0} -eq 1 ]] && extra+="fcitx5 "
+	[[ ${SOFT_OSK:-0} -eq 1 ]] && extra+="osk "
 	row="  extra software: ${extra:-none}"
 	printf '%s│%s%-*s%s│%s\n' "${C_LIME}" "${C_RESET}${C_GREY}" "${inner}" "${row}" "${C_LIME}" "${C_RESET}"
 	printf '%s╰%s╯%s\n' "${C_LIME}" "$(tui_hline '─' "${inner}")" "${C_RESET}"
@@ -333,12 +334,13 @@ tui_summary() {
 #  Third page: extra software
 # ---------------------------------------------------------------------
 #  OPT keys for the optional applications. Each entry is "key|label|hint".
-OPT_SOFT_KEYS=( firefox zennb vlc obs fcitx )
+OPT_SOFT_KEYS=( firefox zennb vlc obs fcitx osk )
 SOFT_FIREFOX=0
 SOFT_ZENNB=0
 SOFT_VLC=0
 SOFT_OBS=0
 SOFT_FCITX=0
+SOFT_OSK=0
 
 soft_state() {
 	case "$1" in
@@ -347,6 +349,7 @@ soft_state() {
 	vlc)   [[ ${SOFT_VLC} -eq 1 ]] && printf 'x' || printf ' ' ;;
 	obs)   [[ ${SOFT_OBS} -eq 1 ]] && printf 'x' || printf ' ' ;;
 	fcitx) [[ ${SOFT_FCITX} -eq 1 ]] && printf 'x' || printf ' ' ;;
+	osk)   [[ ${SOFT_OSK} -eq 1 ]] && printf 'x' || printf ' ' ;;
 	esac
 }
 
@@ -358,6 +361,7 @@ soft_set() {
 	vlc)   SOFT_VLC=${v} ;;
 	obs)   SOFT_OBS=${v} ;;
 	fcitx) SOFT_FCITX=${v} ;;
+	osk)   SOFT_OSK=${v} ;;
 	esac
 }
 
@@ -368,6 +372,7 @@ soft_short() {
 	vlc)   printf 'VLC            media player' ;;
 	obs)   printf 'OBS Studio     screen recording and streaming' ;;
 	fcitx) printf 'fcitx5         Chinese pinyin input method' ;;
+	osk)   printf 'Screen keyboard onboard: on-screen keyboard for touch and pointer' ;;
 	esac
 }
 
@@ -378,6 +383,7 @@ soft_desc() {
 	vlc)   printf 'Plays almost every audio and video format.' ;;
 	obs)   printf 'X11 capture; records the screen through the X composite extension.' ;;
 	fcitx) printf 'Includes fcitx5-chinese-addons (pinyin) and the Qt/GTK modules.' ;;
+	osk)   printf 'Accessibility: X11 has no lightweight option; toggled from the bar IME menu.' ;;
 	esac
 }
 
@@ -414,7 +420,7 @@ tui_soft_render() {
 	printf '\n  %s%s%s\n' "${C_GREY}" "$(tui_hline '─' 68)" "${C_RESET}"
 	printf '  %sselected:%s %s/%s\n' "${C_GREY}" "${C_RESET}" "$(soft_count)" "${#OPT_SOFT_KEYS[@]}"
 	printf '\n'
-	local -a hints=( "1-4:toggle" "a:all" "n:none" "Enter:continue" "b:back" )
+	local -a hints=( "1-6:toggle" "a:all" "n:none" "Enter:continue" "b:back" )
 	local hint="" pair keyk desc
 	for pair in "${hints[@]}"; do
 		keyk="${pair%%:*}"; desc="${pair#*:}"
@@ -439,13 +445,13 @@ tui_soft_menu() {
 			return 2
 			;;
 		a|A|all)
-			SOFT_FIREFOX=1; SOFT_ZENNB=1; SOFT_VLC=1; SOFT_OBS=1; SOFT_FCITX=1
+			SOFT_FIREFOX=1; SOFT_ZENNB=1; SOFT_VLC=1; SOFT_OBS=1; SOFT_FCITX=1; SOFT_OSK=1
 			;;
 		n|N|none)
-			SOFT_FIREFOX=0; SOFT_ZENNB=0; SOFT_VLC=0; SOFT_OBS=0; SOFT_FCITX=0
+			SOFT_FIREFOX=0; SOFT_ZENNB=0; SOFT_VLC=0; SOFT_OBS=0; SOFT_FCITX=0; SOFT_OSK=0
 			;;
 		*)
-			if [[ "${input}" =~ ^[1-4]+$ ]]; then
+			if [[ "${input}" =~ ^[1-6]+$ ]]; then
 				local ch idx
 				for ((ch = 0; ch < ${#input}; ch++)); do
 					idx=$(( ${input:ch:1} - 1 ))

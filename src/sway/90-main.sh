@@ -203,6 +203,7 @@ install_flow() {
 		else
 			write_fix_grub || true
 			write_notify_log || true
+			write_osk_toggle || true
 		fi
 	fi
 

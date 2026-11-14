@@ -161,7 +161,7 @@ install_packages() {
 # ---------------------------------------------------------------------
 install_optional_software() {
 	local any=0
-	[[ ${SOFT_ZENNB:-0} -eq 1 || ${SOFT_VLC:-0} -eq 1 || ${SOFT_OBS:-0} -eq 1 || ${SOFT_FCITX:-0} -eq 1 ]] && any=1
+	[[ ${SOFT_ZENNB:-0} -eq 1 || ${SOFT_VLC:-0} -eq 1 || ${SOFT_OBS:-0} -eq 1 || ${SOFT_FCITX:-0} -eq 1 || ${SOFT_OSK:-0} -eq 1 ]] && any=1
 	[[ ${any} -eq 1 ]] || return 0
 
 	ui_hdr "Optional software"
@@ -184,6 +184,14 @@ install_optional_software() {
 	fi
 	if [[ ${SOFT_ZENNB:-0} -eq 1 ]]; then
 		install_zen_browser || ui_warn "Zen Browser could not be installed"
+	fi
+	if [[ ${SOFT_OSK:-0} -eq 1 ]]; then
+		# Accessibility on-screen keyboard. wvkbd is the only one worth
+		# installing here: 800 KB, a single package, and it links nothing but
+		# libwayland-client plus cairo/pango which the bar already needs.
+		# squeekboard pulls 4 packages and 26 MB, onboard pulls 119 and
+		# maliit-keyboard 105 MB - all of them far heavier for the same job.
+		apt_install "wvkbd" wvkbd || ui_warn "wvkbd could not be installed"
 	fi
 	return 0
 }

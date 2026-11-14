@@ -196,7 +196,7 @@ install_optional_software() {
 	fi
 
 	local any=0
-	[[ ${SOFT_FIREFOX:-0} -eq 1 || ${SOFT_ZENNB:-0} -eq 1 || ${SOFT_VLC:-0} -eq 1 || ${SOFT_OBS:-0} -eq 1 || ${SOFT_FCITX:-0} -eq 1 ]] && any=1
+	[[ ${SOFT_FIREFOX:-0} -eq 1 || ${SOFT_ZENNB:-0} -eq 1 || ${SOFT_VLC:-0} -eq 1 || ${SOFT_OBS:-0} -eq 1 || ${SOFT_FCITX:-0} -eq 1 || ${SOFT_OSK:-0} -eq 1 ]] && any=1
 	[[ ${any} -eq 1 ]] || return 0
 
 	ui_hdr "Optional software"
@@ -223,6 +223,22 @@ install_optional_software() {
 	fi
 	if [[ ${SOFT_ZENNB:-0} -eq 1 ]]; then
 		install_zen_browser || ui_warn "Zen Browser could not be installed"
+	fi
+	if [[ ${SOFT_OSK:-0} -eq 1 ]]; then
+		# Accessibility on-screen keyboard.
+		#
+		# wvkbd cannot be used here: it is Wayland-only, and this session is
+		# X11. onboard is the smallest thing that actually works on X11, but
+		# it is not free - 2 MB of itself plus 119 packages, because it pulls
+		# in the GNOME accessibility stack. That is why it stays opt-in.
+		# onboard-data carries the keyboard layouts and at-spi is what lets
+		# onboard talk to the focused window. Both are Recommends, so
+		# --no-install-recommends drops them, and without them onboard starts
+		# and exits immediately with "Atspi typelib missing" - the package
+		# alone is not enough.
+		apt_install "onboard" onboard onboard-data \
+			gir1.2-atspi-2.0 at-spi2-core \
+			|| ui_warn "onboard could not be installed"
 	fi
 	return 0
 }

@@ -1220,17 +1220,41 @@ do_config() {
 	ver=""
 	have_fcitx && ver=$(fcitx5 --version 2>/dev/null | head -1)
 
+	# On-screen keyboard state. wvkbd is a plain process with no IPC, so the
+	# process table is the state. It is reported here rather than on the bar
+	# proper because it is an accessibility toggle, not something that needs
+	# to be visible at a glance.
+	osk_bin=""
+	for c in wvkbd-mobintl wvkbd; do
+		command -v "$c" >/dev/null 2>&1 && { osk_bin="$c"; break; }
+	done
+	if [ -z "${osk_bin}" ]; then
+		osk_state="not installed"
+	elif pgrep -f "$(basename "${osk_bin}")" >/dev/null 2>&1; then
+		osk_state="on"
+	else
+		osk_state="off"
+	fi
+
 	info="Framework : ${fw}
 State     : ${state_txt}
 Current   : $(pretty "${cur:-none}")
 Enabled   : ${ims:-none}
 Hotkey    : ${hotkey}
-Version   : ${ver:-n/a}"
+Version   : ${ver:-n/a}
+On-screen : ${osk_state}"
 
 	menu="Switch input method
 Restart fcitx5
 Open fcitx5 settings
-Reload configuration
+Reload configuration"
+	case "${osk_state}" in
+	on)             menu="${menu}
+Turn off screen keyboard" ;;
+	off)            menu="${menu}
+Turn on screen keyboard" ;;
+	esac
+	menu="${menu}
 Close"
 
 	# wofi has no -mesg equivalent, so the state goes into the prompt line.
@@ -1263,6 +1287,18 @@ Close"
 		fcitx5-remote -r >/dev/null 2>&1 || fcitx5-remote -o >/dev/null 2>&1
 		pkill -USR1 -x fcitx5 2>/dev/null
 		say "Configuration reloaded" 2000 0
+		;;
+	Turn\ on*|Turn\ off*)
+		# Delegated to the toggle tool so the logic lives in one place.
+		if command -v sway-everforest-osk >/dev/null 2>&1; then
+			sway-everforest-osk >/dev/null 2>&1
+			if pgrep -f "$(basename "${osk_bin}")" >/dev/null 2>&1; then
+				say "Screen keyboard on" 1500 0
+			else
+				say "Screen keyboard off" 1500 0
+			fi
+		fi
+		say "Screen keyboard tool is missing" 3000 1
 		;;
 	esac
 	exit 0
@@ -1683,6 +1719,68 @@ if __name__ == "__main__":
 NOTIFYLOG
 	chmod 755 /usr/local/bin/sway-everforest-notify-log
 	register_file /usr/local/bin/sway-everforest-notify-log
+	return 0
+}
+
+write_osk_toggle() {
+	# Toggle the on-screen keyboard.
+	#
+	# wvkbd is a wlroots keyboard layer: it is spawned as its own surface and
+	# stays until killed, so "toggle" is just start/stop. Bound to Mod+Shift+K
+	# in the sway config, but it also works from a terminal.
+	#
+	# The binary is only present when the accessibility component was chosen at
+	# install time; the binding stays quiet instead of erroring in that case.
+	cat >/usr/local/bin/sway-everforest-osk <<'OSK'
+#!/bin/sh
+# sway-everforest-osk - show/hide the on-screen keyboard (wvkbd)
+#
+#   sway-everforest-osk          toggle
+#   sway-everforest-osk show     start it if it is not running
+#   sway-everforest-osk hide     stop it
+#
+# wvkbd is a single process with no IPC, so the process table is the state.
+
+BIN="$(command -v wvkbd-mobintl || command -v wvkbd)"
+if [ -z "${BIN}" ]; then
+	command -v notify-send >/dev/null 2>&1 &&
+		notify-send -a Everforest -t 3000 "Screen keyboard" 			"wvkbd is not installed (choose it in the installer's optional software page)"
+	exit 1
+fi
+
+# Height only: wvkbd sizes itself from a layer-shell surface anchored to both
+# edges and exposes no width option, so height is the one dimension that can be
+# tuned. 200px still fits the full four-row layout without clipping the top row
+# and covers about a fifth of a 900px screen.
+#
+# Colours are left at wvkbd's own defaults on purpose: an Everforest palette was
+# tried and made the keyboard look foreign next to the rest of the rice, so the
+# stock look wins here.
+WVKBD_ARGS="-L 200 -H 200"
+
+running() {
+	pgrep -f "$(basename "${BIN}")" >/dev/null 2>&1
+}
+
+case "${1:-toggle}" in
+show)
+	running || setsid "${BIN}" ${WVKBD_ARGS} >/dev/null 2>&1 &
+	;;
+hide)
+	pkill -f "$(basename "${BIN}")" 2>/dev/null || true
+	;;
+toggle|*)
+	if running; then
+		pkill -f "$(basename "${BIN}")" 2>/dev/null || true
+	else
+		setsid "${BIN}" ${WVKBD_ARGS} >/dev/null 2>&1 &
+	fi
+	;;
+esac
+exit 0
+OSK
+	chmod 755 /usr/local/bin/sway-everforest-osk
+	register_file /usr/local/bin/sway-everforest-osk
 	return 0
 }
 

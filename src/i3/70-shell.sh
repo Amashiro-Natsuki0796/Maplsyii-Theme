@@ -1016,23 +1016,42 @@ do_config() {
 	ver=""
 	have_fcitx && ver=$(fcitx5 --version 2>/dev/null | head -1)
 
+	# On-screen keyboard state (onboard on X11). Reported in the -mesg block
+	# rather than on the bar: it is an accessibility toggle, not something that
+	# needs to be visible at a glance.
+	if ! command -v onboard >/dev/null 2>&1; then
+		osk_state="not installed"
+	elif pgrep -x onboard >/dev/null 2>&1; then
+		osk_state="on"
+	else
+		osk_state="off"
+	fi
+
 	info="Framework : ${fw}
 State     : ${state_txt}
 Current   : $(pretty "${cur:-none}")
 Enabled   : ${ims:-none}
 Hotkey    : ${hotkey}
-Version   : ${ver:-n/a}"
+Version   : ${ver:-n/a}
+On-screen : ${osk_state}"
 
 	menu="Switch input method
 Restart fcitx5
 Open fcitx5 settings
-Reload configuration
+Reload configuration"
+	case "${osk_state}" in
+	on)             menu="${menu}
+Turn off screen keyboard" ;;
+	off)            menu="${menu}
+Turn on screen keyboard" ;;
+	esac
+	menu="${menu}
 Close"
 
 	choice=$(printf '%s\n' "${menu}" |
 		rofi -dmenu -p "Input method" -mesg "${info}" -theme i3-everforest \
 			-theme-str 'window {width: 520px; height: 380px;}' \
-			-theme-str 'listview {lines: 5;}' 2>/dev/null)
+			-theme-str 'listview {lines: 7;}' 2>/dev/null)
 	[ -n "${choice}" ] || exit 0
 
 	case "${choice}" in
@@ -1059,6 +1078,18 @@ Close"
 		fcitx5-remote -r >/dev/null 2>&1 || fcitx5-remote -o >/dev/null 2>&1
 		pkill -USR1 -x fcitx5 2>/dev/null
 		say "Configuration reloaded" 2000 0
+		;;
+	Turn\ on*|Turn\ off*)
+		# Delegated to the toggle tool so the logic lives in one place.
+		if command -v i3-everforest-osk >/dev/null 2>&1; then
+			i3-everforest-osk >/dev/null 2>&1
+			if pgrep -x onboard >/dev/null 2>&1; then
+				say "Screen keyboard on" 1500 0
+			else
+				say "Screen keyboard off" 1500 0
+			fi
+		fi
+		say "Screen keyboard tool is missing" 3000 1
 		;;
 	esac
 	exit 0
@@ -1727,6 +1758,65 @@ PICK
 # ---------------------------------------------------------------------
 #  Lock screen, idle handling and power menu (X11)
 # ---------------------------------------------------------------------
+write_osk_toggle() {
+	# Toggle the on-screen keyboard.
+	#
+	# onboard is a long-lived GUI process, so "toggle" is start/stop by pid.
+	# Bound to Mod+Shift+K in the i3 config; also usable from a terminal.
+	#
+	# wvkbd - the 800 KB option used by the sway rice - cannot be used here: it
+	# is Wayland-only and this session is X11. onboard is the smallest tool
+	# that works on X11, at the cost of the GNOME accessibility stack.
+	cat >/usr/local/bin/i3-everforest-osk <<'OSK'
+#!/bin/sh
+# i3-everforest-osk - show/hide the on-screen keyboard (onboard)
+#
+#   i3-everforest-osk          toggle
+#   i3-everforest-osk show     start it if it is not running
+#   i3-everforest-osk hide     stop it
+
+BIN="$(command -v onboard)"
+if [ -z "${BIN}" ]; then
+	command -v notify-send >/dev/null 2>&1 &&
+		notify-send -a Everforest -t 3000 "Screen keyboard" 			"onboard is not installed (choose it in the installer's optional software page)"
+	exit 1
+fi
+
+running() {
+	pgrep -x onboard >/dev/null 2>&1
+}
+
+# Onboard's own default size is 1024x300, which covers a third of a small
+# screen. 900x260 is the smallest that still shows every row of the default
+# layout without clipping.
+#
+# There is no --notify-default option; passing one made onboard exit with a
+# usage error and nothing appeared at all. `-s WxH` is the documented way to set
+# the size, and `-D` would detach it, but setsid already does that here.
+ONBOARD_ARGS="-s 900x260"
+
+case "${1:-toggle}" in
+show)
+	running || setsid "${BIN}" ${ONBOARD_ARGS} >/dev/null 2>&1 &
+	;;
+hide)
+	pkill -x onboard 2>/dev/null || true
+	;;
+toggle|*)
+	if running; then
+		pkill -x onboard 2>/dev/null || true
+	else
+		setsid "${BIN}" ${ONBOARD_ARGS} >/dev/null 2>&1 &
+	fi
+	;;
+esac
+exit 0
+OSK
+	chmod 755 /usr/local/bin/i3-everforest-osk
+	register_file /usr/local/bin/i3-everforest-osk
+	return 0
+}
+
 write_lock_and_power() {
 	# i3lock takes a PNG or a flat colour. The wallpaper as the lock screen
 	# is what the reference shows, so prefer it; fall back to the flat
