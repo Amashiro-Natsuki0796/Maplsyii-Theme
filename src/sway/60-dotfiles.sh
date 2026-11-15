@@ -50,6 +50,27 @@ input type:touchpad {
     natural_scroll enabled
     dwt enabled
 }
+# Touchscreen. sway treats a touch panel as an absolute pointer, so these are
+# pointer-emulation settings rather than touch gestures: what the finger does is
+# translated into button events.
+#
+# `tap enabled` is the one that matters most - libinput leaves tap off by
+# default, and a tap doing nothing is what makes a touch panel feel broken.
+#
+# `tap_button_map lrm` maps one finger to the left button, two to the right and
+# three to the middle. sway has no long-press option at all (libinput exposes no
+# such setting and the compositor never sees per-touch timing), so two fingers
+# is the closest equivalent to "long press for the context menu".
+#
+# drag/drag_lock keep a hold-and-move working as a drag without the finger
+# having to stay perfectly still, and natural_scroll matches the touchpad above.
+input type:touch {
+    tap enabled
+    tap_button_map lrm
+    drag enabled
+    drag_lock enabled
+    natural_scroll enabled
+}
 input type:keyboard {
     xkb_options ctrl:nocaps
 }
@@ -189,6 +210,7 @@ exec --no-startup-id swaybg -i "$wall" -m fill
 # which is the honest signal that something needs fixing here.
 exec --no-startup-id /usr/local/bin/i3-everforest-bar-wl
 
+# @@BLUR_BEGIN@@
 # ---- frosted glass ------------------------------------------------------
 #
 # swayfx (the blur fork of sway) renders the blur itself rather than letting a
@@ -255,6 +277,7 @@ for_window [app_id="sway-everforest-powermenu-ui"] floating enable, border none,
 for_window [app_id="fcitx5-config-qt"] blur on
 for_window [app_id="nm-connection-editor"] blur on
 for_window [class="nm-connection-editor"] blur on
+# @@BLUR_END@@
 # No idle handling: the session does not lock itself, blank the screen or
 # suspend. Off at the user's request - a terminal-only desktop that gets locked
 # out of nowhere is worse than one that stays on.
@@ -281,6 +304,12 @@ for_window [class="nm-connection-editor"] blur on
 # restart the session; nothing else depends on it.
 xwayland disable
 SWAYCONF
+	# The blur block is always written: swayfx is a hard requirement of this
+	# component, so reaching this point means it is installed. The markers only
+	# exist so the block stays visually delimited in the source template; they
+	# are stripped here.
+	sed -i '/@@BLUR_BEGIN@@/d;/@@BLUR_END@@/d' "${tmp}"
+
 	install_user_file "${cfg}" 644 <"${tmp}"
 	rm -f "${tmp}"
 }

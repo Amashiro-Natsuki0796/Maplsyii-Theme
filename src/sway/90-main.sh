@@ -160,6 +160,20 @@ install_flow() {
 		install_packages
 	fi
 
+	# The configuration written below is swayfx configuration: blur, blur_xray,
+	# layer_effects and `for_window ... blur on` are extensions stock sway does
+	# not have. On a fresh Debian install the distro sway is what runs, and it
+	# answers every one of those lines with a red swaynag banner.
+	#
+	# So swayfx is built before any dotfile is written, and a failed build stops
+	# the install. Falling back to stock sway would produce a session that
+	# starts with a red banner on every login and no blur anywhere - a desktop
+	# that looks broken rather than one that clearly failed to install. The EXIT
+	# trap removes the build tree, so nothing half-done is left behind.
+	if [[ ${CORE} -eq 1 ]]; then
+		swayfx_install || die "swayfx could not be built; aborting so the session is not left without blur"
+	fi
+
 	# Optional third-page software is independent of the component selection.
 	install_optional_software || true
 

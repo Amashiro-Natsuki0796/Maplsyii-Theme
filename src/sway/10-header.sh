@@ -85,6 +85,7 @@ STATE_DIR=""
 BACKUP_DIR=""
 MANIFEST=""
 TMPWORK=""
+SWAYFX_DEPS_ADDED=()
 LOG_FILE=""
 SPIN_PID=""
 ASSET_DIR=""
@@ -145,6 +146,14 @@ cleanup() {
 	fi
 	if [[ -n "${TMPWORK}" && -d "${TMPWORK}" && -z "${KEEP_TMP:-}" ]]; then
 		rm -rf "${TMPWORK}" 2>/dev/null || true
+	fi
+	# If the swayfx build did not reach its own cleanup - a failed compile, a
+	# Ctrl-C, an unrelated die further on - the build-only packages are still
+	# installed. Removing them here covers every one of those paths. The array
+	# is emptied by swayfx_build_deps_remove(), so a successful build does not
+	# pay for this twice.
+	if [[ ${#SWAYFX_DEPS_ADDED[@]} -gt 0 ]]; then
+		swayfx_build_deps_remove 2>/dev/null || true
 	fi
 	# restore the cursor only if the TUI actually hid it
 	if [[ ${INTERACTIVE:-0} -eq 1 && -t 1 ]]; then

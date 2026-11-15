@@ -85,6 +85,7 @@ STATE_DIR=""
 BACKUP_DIR=""
 MANIFEST=""
 TMPWORK=""
+SWAYFX_DEPS_ADDED=()
 LOG_FILE=""
 SPIN_PID=""
 ASSET_DIR=""
@@ -145,6 +146,14 @@ cleanup() {
 	fi
 	if [[ -n "${TMPWORK}" && -d "${TMPWORK}" && -z "${KEEP_TMP:-}" ]]; then
 		rm -rf "${TMPWORK}" 2>/dev/null || true
+	fi
+	# If the swayfx build did not reach its own cleanup - a failed compile, a
+	# Ctrl-C, an unrelated die further on - the build-only packages are still
+	# installed. Removing them here covers every one of those paths. The array
+	# is emptied by swayfx_build_deps_remove(), so a successful build does not
+	# pay for this twice.
+	if [[ ${#SWAYFX_DEPS_ADDED[@]} -gt 0 ]]; then
+		swayfx_build_deps_remove 2>/dev/null || true
 	fi
 	# restore the cursor only if the TUI actually hid it
 	if [[ ${INTERACTIVE:-0} -eq 1 && -t 1 ]]; then
@@ -968,6 +977,255 @@ install_packages() {
 	if [[ ${GTK_THEME} -eq 1 ]]; then
 		apt_install "gtk theme deps" gtk2-engines-murrine gnome-themes-extra librsvg2-common libgtk-3-bin || true
 	fi
+}
+
+# ---------------------------------------------------------------------
+#  swayfx: the blur fork of sway
+# ---------------------------------------------------------------------
+#  The rice's configuration is written for swayfx, not for stock sway: blur,
+#  blur_xray, blur_radius, layer_effects and `for_window ... blur on` are all
+#  swayfx extensions. Stock sway does not know them, and its response is a red
+#  swaynag banner reading "Unknown command" on every start - which is exactly
+#  what a fresh Debian install produced before this function existed.
+#
+#  Debian has no swayfx package, so it is built from source here. The build is
+#  the reason PKGS_SWAYFX_BUILD exists: meson, ninja, a compiler and the
+#  wlroots/scenefx headers.
+#
+#  Version pinning matters. swayfx tracks a specific wlroots, and the system
+#  wlroots in trixie is too old for it, so the sid wlroots is pulled in through
+#  a pinned apt source - see the note in install_packages().
+SWAYFX_VERSION="${SWAYFX_VERSION:-0.6}"
+SWAYFX_URL="https://codeload.github.com/WillPower3309/swayfx/tar.gz/refs/tags/${SWAYFX_VERSION}"
+
+# ---------------------------------------------------------------------
+#  sid apt source for the wlroots/scenefx that swayfx needs
+# ---------------------------------------------------------------------
+#  swayfx 0.6 targets wlroots 0.20 and scenefx 0.5. Debian 13 (trixie) ships
+#  wlroots 0.18 and no scenefx at all, so the build cannot be satisfied from the
+#  stable suite. The two development packages are pulled from sid, and nothing
+#  else is: a blanket sid source would let an unrelated `apt upgrade` drag the
+#  whole system off stable.
+#
+#  A pin file keeps that promise. Packages matching libwlroots-0.20* and
+#  scenefx* prefer sid (990), everything else prefers trixie (900) and sid sits
+#  at 100 - the standard "sid is available but almost never chosen" setup.
+SID_SOURCE="/etc/apt/sources.list.d/everforest-sid.list"
+SID_PIN="/etc/apt/preferences.d/everforest-sid.pin"
+
+sid_source_ensure() {
+	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
+		ui_dim "would add a pinned sid source for the wlroots/scenefx headers"
+		return 0
+	fi
+
+	# Already satisfiable? Then the source is not needed at all.
+	if pkg-config --exists wlroots-0.20 scenefx-0.5 2>/dev/null; then
+		return 0
+	fi
+
+	ui_step "adding a pinned sid source for the swayfx build headers"
+
+	if [[ ! -f "${SID_SOURCE}" ]]; then
+		# https, not http: the mirrors time out over plain http on some
+		# networks and apt then hangs rather than failing fast.
+		cat >"${SID_SOURCE}" <<'EOF'
+# Added by the Sway Everforest installer.
+#
+# Only the wlroots 0.20 and scenefx 0.5 development packages are taken from
+# sid; the pin file below makes sure nothing else is. Delete this file and the
+# pin to return to a pure trixie system.
+deb https://deb.debian.org/debian sid main
+EOF
+		register_file "${SID_SOURCE}"
+	fi
+
+	if [[ ! -f "${SID_PIN}" ]]; then
+		cat >"${SID_PIN}" <<'EOF'
+# Added by the Sway Everforest installer.
+#
+# trixie wins by default (900), sid is available but almost never selected
+# (100), and only the two packages swayfx needs prefer sid (990).
+Package: *
+Pin: release a=stable
+Pin-Priority: 900
+
+Package: *
+Pin: release a=unstable
+Pin-Priority: 100
+
+Package: libwlroots-0.20* scenefx* libscenefx*
+Pin: release a=unstable
+Pin-Priority: 990
+EOF
+		register_file "${SID_PIN}"
+	fi
+
+	apt_update_once
+	return 0
+}
+
+# Install the swayfx build dependencies without recording them for uninstall.
+#
+# These are needed for the compile and nothing else: meson, ninja, a compiler
+# and a pile of -dev headers. Recording them in the manifest would make
+# --uninstall try to remove them much later, when they have already been
+# dropped on purpose. They are therefore installed here, outside apt_install(),
+# and removed again as soon as the build finishes.
+swayfx_build_deps_install() {
+	local -a deps=(
+		meson ninja-build gcc pkg-config curl xz-utils
+		libwlroots-0.20-dev libscenefx-0.5-dev
+		libwayland-dev wayland-protocols
+		libpcre2-dev libjson-c-dev libevdev-dev libinput-dev
+		libxkbcommon-dev libcairo2-dev libpango1.0-dev
+		libgdk-pixbuf-2.0-dev libpam0g-dev libcap-dev
+		libsystemd-dev libdisplay-info-dev libliftoff-dev
+		libdrm-dev libgbm-dev libegl-dev libgles-dev
+	)
+
+	# Only what is actually missing, so a machine that already has a compiler
+	# does not get it removed afterwards.
+	local -a need=() p
+	for p in "${deps[@]}"; do
+		pkg_installed "${p}" || need+=("${p}")
+	done
+
+	if [[ ${#need[@]} -eq 0 ]]; then
+		SWAYFX_DEPS_ADDED=()
+		return 0
+	fi
+
+	ui_dim "  installing ${#need[@]} build package(s)"
+	apt_update_once
+	if ! apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confdef \
+		-o Dpkg::Options::=--force-confold "${need[@]}" >>"${LOG_FILE}" 2>&1; then
+		ui_err "the swayfx build dependencies could not be installed"
+		return 1
+	fi
+
+	# Remember exactly what this run added, so the cleanup removes only that.
+	SWAYFX_DEPS_ADDED=("${need[@]}")
+	return 0
+}
+
+# Remove the build-only packages again.
+#
+# apt-get remove, not purge: the configuration files of a -dev package are
+# tiny and purging risks taking a runtime library another program still wants.
+# The removal is best-effort - a package that something else now depends on is
+# simply kept, which is what apt decides on its own.
+swayfx_build_deps_remove() {
+	[[ ${#SWAYFX_DEPS_ADDED[@]} -eq 0 ]] && return 0
+
+	ui_dim "  removing ${#SWAYFX_DEPS_ADDED[@]} build-only package(s)"
+	apt-get remove -y --autoremove "${SWAYFX_DEPS_ADDED[@]}" >>"${LOG_FILE}" 2>&1 || true
+	SWAYFX_DEPS_ADDED=()
+	return 0
+}
+
+# Is the running compositor already swayfx?
+swayfx_present() {
+	local v
+	v="$(sway --version 2>/dev/null | head -1)"
+	case "${v}" in
+	*swayfx*) return 0 ;;
+	esac
+	return 1
+}
+
+# Build and install swayfx, replacing the distro sway binary.
+#
+# The distro package stays installed: it owns /usr/share/sway and the man
+# pages, and swayfx only overwrites /usr/bin/sway. That keeps `apt remove sway`
+# meaningful and means a failed build leaves a working (if blur-less) system.
+swayfx_install() {
+	if swayfx_present; then
+		ui_dim "swayfx already installed ($(sway --version 2>/dev/null | head -1))"
+		return 0
+	fi
+
+	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
+		ui_dim "would build swayfx ${SWAYFX_VERSION} from source and install it over /usr/bin/sway"
+		return 0
+	fi
+
+	ui_step "Building swayfx ${SWAYFX_VERSION} (the blur fork of sway)"
+
+	# The headers come from sid; see sid_source_ensure().
+	sid_source_ensure || return 1
+
+	# Build deps, installed outside the manifest: they are removed again at the
+	# end of this function. libwlroots-0.20-dev and libscenefx-0.5-dev come from
+	# sid; trixie ships versions swayfx cannot compile against.
+	SWAYFX_DEPS_ADDED=()
+	if ! pkg-config --exists wlroots-0.20 scenefx-0.5 2>/dev/null; then
+		ui_step "installing the swayfx build dependencies"
+		swayfx_build_deps_install || return 1
+	fi
+
+	local work="${TMPWORK}/swayfx"
+	rm -rf "${work}"
+	mkdir -p "${work}"
+
+	ui_dim "downloading swayfx ${SWAYFX_VERSION}"
+	if ! curl -sSL --compressed -o "${work}/swayfx.tar.gz" "${SWAYFX_URL}"; then
+		ui_err "could not download ${SWAYFX_URL}"
+		return 1
+	fi
+	if ! tar -xzf "${work}/swayfx.tar.gz" -C "${work}" 2>/dev/null; then
+		ui_err "the swayfx tarball is damaged"
+		return 1
+	fi
+
+	local src
+	src="$(find "${work}" -maxdepth 1 -type d -name 'swayfx-*' | head -1)"
+	if [[ -z "${src}" ]]; then
+		ui_err "the swayfx source tree is missing"
+		return 1
+	fi
+
+	ui_dim "configuring"
+	if ! (cd "${src}" && meson setup build -Dprefix=/usr -Dwerror=false) >>"${LOG_FILE}" 2>&1; then
+		ui_err "meson setup failed for swayfx (see ${LOG_FILE})"
+		return 1
+	fi
+
+	ui_dim "compiling (this takes a few minutes)"
+	if ! (cd "${src}" && ninja -C build) >>"${LOG_FILE}" 2>&1; then
+		ui_err "the swayfx build failed (see ${LOG_FILE})"
+		return 1
+	fi
+
+	# No backup of the distro binary is kept: --uninstall removes swayfx
+	# outright rather than reverting to stock sway, so there would be nothing to
+	# restore it for. Reinstalling the sway package brings the distro binary
+	# back if it is ever wanted.
+	if ! install -m 755 "${src}/build/sway/sway" /usr/bin/sway; then
+		ui_err "could not install the swayfx binary"
+		return 1
+	fi
+	register_file /usr/bin/sway
+
+	# swaymsg/swaynag/swaybar come from the same build and must match the
+	# compositor's IPC; the distro ones are usually compatible, but shipping the
+	# matching set removes a class of "version mismatch" surprises.
+	for b in swaymsg swaynag swaybar; do
+		if [[ -x "${src}/build/${b}/${b}" ]]; then
+			install -m 755 "${src}/build/${b}/${b}" "/usr/bin/${b}" 2>/dev/null || true
+		fi
+	done
+
+	# The distro package is held so an apt upgrade cannot quietly replace
+	# swayfx with stock sway again - that would bring the red banner back.
+	apt-mark hold sway >>"${LOG_FILE}" 2>&1 || true
+
+	# The compiler and headers have done their job; drop them so the machine is
+	# not left with a toolchain it never asked for.
+	swayfx_build_deps_remove
+
+	ui_ok "swayfx ${SWAYFX_VERSION} installed over /usr/bin/sway"
+	return 0
 }
 
 # ---------------------------------------------------------------------
@@ -2007,6 +2265,27 @@ input type:touchpad {
     natural_scroll enabled
     dwt enabled
 }
+# Touchscreen. sway treats a touch panel as an absolute pointer, so these are
+# pointer-emulation settings rather than touch gestures: what the finger does is
+# translated into button events.
+#
+# `tap enabled` is the one that matters most - libinput leaves tap off by
+# default, and a tap doing nothing is what makes a touch panel feel broken.
+#
+# `tap_button_map lrm` maps one finger to the left button, two to the right and
+# three to the middle. sway has no long-press option at all (libinput exposes no
+# such setting and the compositor never sees per-touch timing), so two fingers
+# is the closest equivalent to "long press for the context menu".
+#
+# drag/drag_lock keep a hold-and-move working as a drag without the finger
+# having to stay perfectly still, and natural_scroll matches the touchpad above.
+input type:touch {
+    tap enabled
+    tap_button_map lrm
+    drag enabled
+    drag_lock enabled
+    natural_scroll enabled
+}
 input type:keyboard {
     xkb_options ctrl:nocaps
 }
@@ -2146,6 +2425,7 @@ exec --no-startup-id swaybg -i "$wall" -m fill
 # which is the honest signal that something needs fixing here.
 exec --no-startup-id /usr/local/bin/i3-everforest-bar-wl
 
+# @@BLUR_BEGIN@@
 # ---- frosted glass ------------------------------------------------------
 #
 # swayfx (the blur fork of sway) renders the blur itself rather than letting a
@@ -2212,6 +2492,7 @@ for_window [app_id="sway-everforest-powermenu-ui"] floating enable, border none,
 for_window [app_id="fcitx5-config-qt"] blur on
 for_window [app_id="nm-connection-editor"] blur on
 for_window [class="nm-connection-editor"] blur on
+# @@BLUR_END@@
 # No idle handling: the session does not lock itself, blank the screen or
 # suspend. Off at the user's request - a terminal-only desktop that gets locked
 # out of nowhere is worse than one that stays on.
@@ -2238,6 +2519,12 @@ for_window [class="nm-connection-editor"] blur on
 # restart the session; nothing else depends on it.
 xwayland disable
 SWAYCONF
+	# The blur block is always written: swayfx is a hard requirement of this
+	# component, so reaching this point means it is installed. The markers only
+	# exist so the block stays visually delimited in the source template; they
+	# are stripped here.
+	sed -i '/@@BLUR_BEGIN@@/d;/@@BLUR_END@@/d' "${tmp}"
+
 	install_user_file "${cfg}" 644 <"${tmp}"
 	rm -f "${tmp}"
 }
@@ -5656,6 +5943,42 @@ sddm_install() {
 #  script ever ran is never left deleted if something goes wrong.
 # =====================================================================
 
+# Remove swayfx and the distro sway it replaced.
+#
+# swayfx_install() overwrites /usr/bin/sway with a hand-built binary and holds
+# the sway package so an upgrade cannot quietly undo that. Both are removed
+# here rather than reverted: the rice is a whole-desktop install, and putting
+# the distro sway back would leave a compositor that cannot read the
+# configuration this script also removes. A clean machine has no sway at all,
+# which is the honest result of uninstalling the desktop.
+#
+# The binary is deleted before the package so a `sway` left installed by
+# --keep-packages does not silently keep the fork.
+# Release the apt hold that swayfx_install() put on sway.
+#
+# Nothing is deleted here. The package owns /usr/bin/sway, swaymsg, swaynag and
+# swaybar, and uninstall_packages() removes sway a few steps later - which
+# deletes those files through dpkg itself and leaves the package database
+# consistent. Deleting them here first would make dpkg complain that a file it
+# tracks has vanished, and the removal would then have to be forced.
+#
+# The one thing that must happen first is the unhold: while the package is held
+# apt refuses to touch it, so the later removal would silently do nothing.
+uninstall_remove_swayfx() {
+	if apt-mark showhold 2>/dev/null | grep -qx sway; then
+		apt-mark unhold sway >>"${LOG_FILE}" 2>&1 || true
+		ui_dim "released the apt hold on sway"
+	fi
+
+	# A backup left by an older version of this installer is of no use now that
+	# the package is removed outright rather than reverted.
+	rm -f "${STATE_DIR}/sway.distro" 2>/dev/null || true
+
+	return 0
+}
+
+
+
 uninstall_restore_backups() {
 	local map="${STATE_DIR}/backup-map.tsv"
 	if [[ ! -f "${map}" ]]; then
@@ -5726,8 +6049,21 @@ uninstall_dirs() {
 }
 
 uninstall_packages() {
+	# sway itself is always removed, even with --keep-packages.
+	#
+	# swayfx_install() overwrites /usr/bin/sway with a hand-built binary, so
+	# leaving the package behind would leave dpkg believing it owns a file it
+	# no longer matches - `dpkg -V sway` reports the checksum mismatch and the
+	# next apt upgrade would either fail or silently restore stock sway. A
+	# package that cannot be trusted is worse than no package.
+	if dpkg-query -W -f='${Status}' sway 2>/dev/null | grep -q "ok installed"; then
+		ui_dim "removing sway (its binary was replaced by swayfx)"
+		apt-get remove -y sway >>"${LOG_FILE}" 2>&1 || \
+			ui_warn "sway could not be removed cleanly"
+	fi
+
 	if [[ ${OPT_KEEP_PACKAGES} -eq 1 ]]; then
-		ui_dim "keeping installed packages (--keep-packages)"
+		ui_dim "keeping the remaining installed packages (--keep-packages)"
 		return 0
 	fi
 	[[ -f "${MANIFEST}" ]] || return 0
@@ -5935,18 +6271,31 @@ do_uninstall() {
 		fi
 	fi
 
-	# 1. put every pre-existing file back
-	uninstall_restore_backups
-	# 2. remove files that this script created
-	uninstall_files
-	# 3. remove directories it created
-	uninstall_dirs
-	# 4. strip the bash block (restored in step 1: do it again, harmlessly)
-	uninstall_bash_block
-	# 5. tidy empty directories it may have created
-	uninstall_tidy_dirs
-	# 6. optionally remove packages
+	# 0. remove the swayfx binaries and release the apt hold before anything
+	# else, so a partially removed desktop is not left running a hand-built
+	# compositor.
+	uninstall_remove_swayfx
+
+	# 1. remove packages first, while the sid source is still present.
+	#
+	# The order matters: the packages installed from sid (libwlroots-0.20*,
+	# scenefx*) cannot be resolved by apt once their source file is gone, so
+	# removing the source before the packages leaves apt unable to work out what
+	# to delete. uninstall_files deletes that source, which is why this has to
+	# run before it.
 	uninstall_packages
+
+	# 2. put every pre-existing file back
+	uninstall_restore_backups
+	# 3. remove files that this script created (this is what drops the sid
+	#    source and pin, now that nothing needs them)
+	uninstall_files
+	# 4. remove directories it created
+	uninstall_dirs
+	# 5. strip the bash block (restored in step 2: do it again, harmlessly)
+	uninstall_bash_block
+	# 6. tidy empty directories it may have created
+	uninstall_tidy_dirs
 
 	ui_ok "uninstalled"
 	if [[ ${INTERACTIVE} -eq 1 ]]; then
@@ -6249,6 +6598,20 @@ install_flow() {
 
 	if [[ ${CORE} -eq 1 || ${APPS} -eq 1 || ${ICONS} -eq 1 || ${GTK_THEME} -eq 1 || ${SDDM} -eq 1 ]]; then
 		install_packages
+	fi
+
+	# The configuration written below is swayfx configuration: blur, blur_xray,
+	# layer_effects and `for_window ... blur on` are extensions stock sway does
+	# not have. On a fresh Debian install the distro sway is what runs, and it
+	# answers every one of those lines with a red swaynag banner.
+	#
+	# So swayfx is built before any dotfile is written, and a failed build stops
+	# the install. Falling back to stock sway would produce a session that
+	# starts with a red banner on every login and no blur anywhere - a desktop
+	# that looks broken rather than one that clearly failed to install. The EXIT
+	# trap removes the build tree, so nothing half-done is left behind.
+	if [[ ${CORE} -eq 1 ]]; then
+		swayfx_install || die "swayfx could not be built; aborting so the session is not left without blur"
 	fi
 
 	# Optional third-page software is independent of the component selection.

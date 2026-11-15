@@ -7,6 +7,42 @@
 #  script ever ran is never left deleted if something goes wrong.
 # =====================================================================
 
+# Remove swayfx and the distro sway it replaced.
+#
+# swayfx_install() overwrites /usr/bin/sway with a hand-built binary and holds
+# the sway package so an upgrade cannot quietly undo that. Both are removed
+# here rather than reverted: the rice is a whole-desktop install, and putting
+# the distro sway back would leave a compositor that cannot read the
+# configuration this script also removes. A clean machine has no sway at all,
+# which is the honest result of uninstalling the desktop.
+#
+# The binary is deleted before the package so a `sway` left installed by
+# --keep-packages does not silently keep the fork.
+# Release the apt hold that swayfx_install() put on sway.
+#
+# Nothing is deleted here. The package owns /usr/bin/sway, swaymsg, swaynag and
+# swaybar, and uninstall_packages() removes sway a few steps later - which
+# deletes those files through dpkg itself and leaves the package database
+# consistent. Deleting them here first would make dpkg complain that a file it
+# tracks has vanished, and the removal would then have to be forced.
+#
+# The one thing that must happen first is the unhold: while the package is held
+# apt refuses to touch it, so the later removal would silently do nothing.
+uninstall_remove_swayfx() {
+	if apt-mark showhold 2>/dev/null | grep -qx sway; then
+		apt-mark unhold sway >>"${LOG_FILE}" 2>&1 || true
+		ui_dim "released the apt hold on sway"
+	fi
+
+	# A backup left by an older version of this installer is of no use now that
+	# the package is removed outright rather than reverted.
+	rm -f "${STATE_DIR}/sway.distro" 2>/dev/null || true
+
+	return 0
+}
+
+
+
 uninstall_restore_backups() {
 	local map="${STATE_DIR}/backup-map.tsv"
 	if [[ ! -f "${map}" ]]; then
@@ -77,8 +113,21 @@ uninstall_dirs() {
 }
 
 uninstall_packages() {
+	# sway itself is always removed, even with --keep-packages.
+	#
+	# swayfx_install() overwrites /usr/bin/sway with a hand-built binary, so
+	# leaving the package behind would leave dpkg believing it owns a file it
+	# no longer matches - `dpkg -V sway` reports the checksum mismatch and the
+	# next apt upgrade would either fail or silently restore stock sway. A
+	# package that cannot be trusted is worse than no package.
+	if dpkg-query -W -f='${Status}' sway 2>/dev/null | grep -q "ok installed"; then
+		ui_dim "removing sway (its binary was replaced by swayfx)"
+		apt-get remove -y sway >>"${LOG_FILE}" 2>&1 || \
+			ui_warn "sway could not be removed cleanly"
+	fi
+
 	if [[ ${OPT_KEEP_PACKAGES} -eq 1 ]]; then
-		ui_dim "keeping installed packages (--keep-packages)"
+		ui_dim "keeping the remaining installed packages (--keep-packages)"
 		return 0
 	fi
 	[[ -f "${MANIFEST}" ]] || return 0
@@ -286,18 +335,31 @@ do_uninstall() {
 		fi
 	fi
 
-	# 1. put every pre-existing file back
-	uninstall_restore_backups
-	# 2. remove files that this script created
-	uninstall_files
-	# 3. remove directories it created
-	uninstall_dirs
-	# 4. strip the bash block (restored in step 1: do it again, harmlessly)
-	uninstall_bash_block
-	# 5. tidy empty directories it may have created
-	uninstall_tidy_dirs
-	# 6. optionally remove packages
+	# 0. remove the swayfx binaries and release the apt hold before anything
+	# else, so a partially removed desktop is not left running a hand-built
+	# compositor.
+	uninstall_remove_swayfx
+
+	# 1. remove packages first, while the sid source is still present.
+	#
+	# The order matters: the packages installed from sid (libwlroots-0.20*,
+	# scenefx*) cannot be resolved by apt once their source file is gone, so
+	# removing the source before the packages leaves apt unable to work out what
+	# to delete. uninstall_files deletes that source, which is why this has to
+	# run before it.
 	uninstall_packages
+
+	# 2. put every pre-existing file back
+	uninstall_restore_backups
+	# 3. remove files that this script created (this is what drops the sid
+	#    source and pin, now that nothing needs them)
+	uninstall_files
+	# 4. remove directories it created
+	uninstall_dirs
+	# 5. strip the bash block (restored in step 2: do it again, harmlessly)
+	uninstall_bash_block
+	# 6. tidy empty directories it may have created
+	uninstall_tidy_dirs
 
 	ui_ok "uninstalled"
 	if [[ ${INTERACTIVE} -eq 1 ]]; then
