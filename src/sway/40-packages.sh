@@ -190,6 +190,11 @@ SWAYFX_URL="https://codeload.github.com/WillPower3309/swayfx/tar.gz/refs/tags/${
 SID_SOURCE="/etc/apt/sources.list.d/everforest-sid.list"
 SID_PIN="/etc/apt/preferences.d/everforest-sid.pin"
 
+# Set to 1 once the source is wanted; cleanup() removes it again if the build
+# never finished. Declared here so `set -u` is happy when they are read.
+SID_SOURCE_ADDED="${SID_SOURCE_ADDED:-0}"
+SWAYFX_INSTALLED="${SWAYFX_INSTALLED:-0}"
+
 sid_source_ensure() {
 	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then
 		ui_dim "would add a pinned sid source for the wlroots/scenefx headers"
@@ -215,6 +220,9 @@ sid_source_ensure() {
 deb https://deb.debian.org/debian sid main
 EOF
 		register_file "${SID_SOURCE}"
+		# Only a file this run created may be removed by cleanup(). A source the
+		# user already had must survive a failed install.
+		SID_SOURCE_ADDED=1
 	fi
 
 	if [[ ! -f "${SID_PIN}" ]]; then
@@ -295,8 +303,54 @@ swayfx_build_deps_install() {
 swayfx_build_deps_remove() {
 	[[ ${#SWAYFX_DEPS_ADDED[@]} -eq 0 ]] && return 0
 
-	ui_dim "  removing ${#SWAYFX_DEPS_ADDED[@]} build-only package(s)"
-	apt-get remove -y --autoremove "${SWAYFX_DEPS_ADDED[@]}" >>"${LOG_FILE}" 2>&1 || true
+	# The two runtime libraries stay. libwlroots-0.20 and libscenefx-0.5 are
+	# linked by the swayfx binary itself:
+	#
+	#   libscenefx-0.5.so => /usr/lib/x86_64-linux-gnu/libscenefx-0.5.so
+	#
+	# apt marks them automatic because only a -dev package depends on them, so
+	# `apt-get remove --autoremove` on the -dev packages takes the runtime
+	# libraries with it. sway then fails to resolve its own shared objects,
+	# exits immediately, and SDDM drops straight back to the login screen - a
+	# black flash and no session, with nothing obvious in the logs.
+	#
+	# Marking them manual first is what keeps autoremove away from them. This is
+	# the whole reason the removal below lists packages one by one instead of
+	# passing everything and letting apt decide.
+	local p
+	for p in libwlroots-0.20-0 libwlroots-0.20 libscenefx-0.5; do
+		if dpkg-query -W -f='${Status}' "${p}" 2>/dev/null | grep -q "ok installed"; then
+			apt-mark manual "${p}" >>"${LOG_FILE}" 2>&1 || true
+		fi
+	done
+
+	# Build-only packages, removed explicitly. --autoremove is deliberately NOT
+	# used: with the runtime libraries protected above it would be harmless, but
+	# the flag is what caused the black screen in the first place, and an
+	# explicit list is easier to reason about.
+	local -a removable=()
+	for p in "${SWAYFX_DEPS_ADDED[@]}"; do
+		case "${p}" in
+		# Runtime libraries and anything that could pull them out.
+		libwlroots-0.20|libscenefx-0.5) continue ;;
+		esac
+		removable+=("${p}")
+	done
+
+	if [[ ${#removable[@]} -gt 0 ]]; then
+		ui_dim "  removing ${#removable[@]} build-only package(s)"
+		# A timeout because this also runs from the EXIT trap: if apt is holding
+		# a lock, waiting on a dead mirror or asking a question, the script would
+		# otherwise hang on the way out and the user would see a frozen terminal
+		# with no explanation. A skipped cleanup is recoverable, a hung exit is
+		# not.
+		if command -v timeout >/dev/null 2>&1; then
+			timeout 180 apt-get remove -y "${removable[@]}" >>"${LOG_FILE}" 2>&1 || true
+		else
+			apt-get remove -y "${removable[@]}" >>"${LOG_FILE}" 2>&1 || true
+		fi
+	fi
+
 	SWAYFX_DEPS_ADDED=()
 	return 0
 }
@@ -401,6 +455,7 @@ swayfx_install() {
 	# not left with a toolchain it never asked for.
 	swayfx_build_deps_remove
 
+	SWAYFX_INSTALLED=1
 	ui_ok "swayfx ${SWAYFX_VERSION} installed over /usr/bin/sway"
 	return 0
 }

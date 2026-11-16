@@ -114,6 +114,11 @@ preflight() {
 # ---------------------------------------------------------------------
 manifest_add() {
 	[[ -n "${MANIFEST}" ]] || return 0
+	# The state directory is created here rather than only in snapshot_packages(),
+	# because that function returns early under --dry-run: every register_file()
+	# call after it then tried to append to a file in a directory that did not
+	# exist yet and printed "No such file or directory" on a clean machine.
+	mkdir -p "${STATE_DIR}" 2>/dev/null || true
 	printf '%s\t%s\n' "$1" "$2" >>"${MANIFEST}.new"
 }
 

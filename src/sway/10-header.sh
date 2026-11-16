@@ -155,6 +155,17 @@ cleanup() {
 	if [[ ${#SWAYFX_DEPS_ADDED[@]} -gt 0 ]]; then
 		swayfx_build_deps_remove 2>/dev/null || true
 	fi
+	# The pinned sid source is only useful while a build is in progress. If the
+	# run ended before swayfx was installed, leaving it behind would quietly turn
+	# this stable machine into one that can install sid packages at 100 pins -
+	# harmless in practice, but not what the user asked for, and confusing the
+	# next time apt suggests something from unstable.
+	#
+	# SID_SOURCE_ADDED is set by sid_source_ensure() only when it actually wrote
+	# the files, so a machine that already had them keeps them.
+	if [[ ${SID_SOURCE_ADDED:-0} -eq 1 && ${SWAYFX_INSTALLED:-0} -eq 0 ]]; then
+		rm -f "${SID_SOURCE}" "${SID_PIN}" 2>/dev/null || true
+	fi
 	# restore the cursor only if the TUI actually hid it
 	if [[ ${INTERACTIVE:-0} -eq 1 && -t 1 ]]; then
 		printf '\033[?25h' 2>/dev/null || true
