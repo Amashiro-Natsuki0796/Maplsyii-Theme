@@ -50,26 +50,34 @@ input type:touchpad {
     natural_scroll enabled
     dwt enabled
 }
-# Touchscreen. sway treats a touch panel as an absolute pointer, so these are
-# pointer-emulation settings rather than touch gestures: what the finger does is
-# translated into button events.
+# Touchscreen.
 #
-# `tap enabled` is the one that matters most - libinput leaves tap off by
-# default, and a tap doing nothing is what makes a touch panel feel broken.
+# A touch panel is an absolute pointer: libinput turns a finger into button
+# presses and motion, and that is the whole model. There is no gesture layer.
 #
-# `tap_button_map lrm` maps one finger to the left button, two to the right and
-# three to the middle. sway has no long-press option at all (libinput exposes no
-# such setting and the compositor never sees per-touch timing), so two fingers
-# is the closest equivalent to "long press for the context menu".
+# Only two of the input options do anything here, and it is worth saying why the
+# obvious ones are absent:
 #
-# drag/drag_lock keep a hold-and-move working as a drag without the finger
-# having to stay perfectly still, and natural_scroll matches the touchpad above.
+#   tap / tap_button_map   These are *touchpad* features. sway applies them
+#                          through libinput_device_config_tap_*, which refuses
+#                          any device whose tap finger count is 0 - and a
+#                          touchscreen's is 0. Writing them here looks correct
+#                          and silently does nothing, which is worse than
+#                          leaving them out: a single finger tap already sends
+#                          the left button without any configuration, so a
+#                          working tap makes the config look like it took
+#                          effect when it never ran. Two-finger "right click"
+#                          does not exist on a touch panel for the same reason.
+#
+#   natural_scroll         A touchscreen does not scroll. Its events are pointer
+#                          motion, so there is nothing for this to reverse.
+#
+# What is left is dragging: holding a finger and moving drives a button-down
+# drag, and drag_lock keeps it going when the finger is lifted and put back
+# down within the timeout. Both are genuine touch-panel options.
 input type:touch {
-    tap enabled
-    tap_button_map lrm
     drag enabled
     drag_lock enabled
-    natural_scroll enabled
 }
 input type:keyboard {
     xkb_options ctrl:nocaps

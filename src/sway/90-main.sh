@@ -65,7 +65,7 @@ NOTES
   Everything the look needs (theme, icons, wallpaper) is embedded, so it
   also works with no network at all.
   After installing, reboot: SDDM shows the SilentSDDM greeter, and picking
-  "Sway (Everforest)" logs straight into the desktop.
+  "Sway" logs straight into the desktop.
   On a machine with no display manager at all, choose the "sddm" component.
 
 KEYBINDINGS AFTER INSTALL
@@ -382,7 +382,7 @@ print_summary() {
 	ui_hdr "Done"
 	ui_ok "Sway Everforest is installed for user ${TARGET_USER}"
 	printf '\n'
-	ui_line "Log out and choose ${C_BOLD}Sway (Everforest)${C_RESET} at the login screen,"
+	ui_line "Log out and choose ${C_BOLD}Sway${C_RESET} at the login screen,"
 	ui_line "or start it from a TTY with:  ${C_LIME}sway${C_RESET}"
 	printf '\n'
 	ui_line "Keybindings:"

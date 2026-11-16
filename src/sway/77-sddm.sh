@@ -219,7 +219,7 @@ EOF
 sddm_write_wayland_wrapper() {
 	cat >"${SDDM_XSESSION_WRAPPER}" <<'EOF'
 #!/bin/sh
-# Launcher for the Sway (Everforest) session, used by the wayland-sessions
+# Launcher for the Sway session, used by the wayland-sessions
 # entry. SDDM hands over a minimal environment, so everything sway and the
 # applications under it expect is set here.
 

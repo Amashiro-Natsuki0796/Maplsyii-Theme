@@ -96,6 +96,74 @@ EOF
 	return 0
 }
 
+# Make sure the fallback themes are named in the icon theme's inheritance chain.
+#
+# GTK resolves an icon by walking the theme, then each theme in its `Inherits`
+# list in order. The bundled set contains no per-application artwork, so any app
+# it does not carry - which is most of them - has to come from a later entry.
+# With only gnome,hicolor in that list a browser fell through to the stock
+# placeholder even though the Numix drawings were installed on the same machine.
+#
+# Numix-Circle first, because it is the closest match to this theme's shape, then
+# Numix, then the original tail. Duplicates are dropped so re-running the
+# installer does not grow the line.
+icons_ensure_inherits() {
+	local dest="$1"
+	local index="${dest}/index.theme"
+	[[ -f "${index}" ]] || return 0
+
+	# Which of the fallback themes are actually present? Naming an absent theme
+	# is harmless but pointless, and it makes the file harder to read.
+	local -a want=()
+	local t
+	for t in Numix-Circle Numix; do
+		if [[ -d "/usr/share/icons/${t}" || -d "/usr/local/share/icons/${t}" ||
+		      -d "${HOME_DIR}/.local/share/icons/${t}" ]]; then
+			want+=("${t}")
+		fi
+	done
+
+	local tail="gnome,hicolor"
+	local cur
+	cur="$(sed -n 's/^Inherits=//p' "${index}" 2>/dev/null | head -1)"
+	[[ -n "${cur}" ]] && tail="${cur}"
+
+	# Build the new list: our fallbacks first, then whatever was there.
+	local -a all=("${want[@]}")
+	local IFS=',' part
+	for part in ${tail}; do
+		[[ -n "${part}" ]] && all+=("${part}")
+	done
+	unset IFS
+
+	local -a uniq=()
+	local seen=" " p
+	for p in "${all[@]}"; do
+		case "${seen}" in
+		*" ${p} "*) continue ;;
+		esac
+		seen="${seen}${p} "
+		uniq+=("${p}")
+	done
+
+	[[ ${#uniq[@]} -eq 0 ]] && return 0
+
+	local joined
+	joined="$(printf '%s,' "${uniq[@]}")"
+	joined="${joined%,}"
+
+	# Already correct? Leave the file alone.
+	[[ "${cur}" == "${joined}" ]] && return 0
+
+	if grep -q '^Inherits=' "${index}" 2>/dev/null; then
+		sed -i "s|^Inherits=.*|Inherits=${joined}|" "${index}"
+	else
+		printf 'Inherits=%s\n' "${joined}" >>"${index}"
+	fi
+	ui_dim "icon fallback chain: ${joined}"
+	return 0
+}
+
 icons_install() {
 	ui_hdr "Icon theme"
 	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then ui_dim "would install ${ICON_NAME}"; return 0; fi
@@ -128,6 +196,18 @@ icons_install() {
 			return 1
 		fi
 	fi
+
+	# The bundled set is deliberately small: it carries the Everforest folder
+	# colours and the panel/status glyphs the bar uses, not one icon per
+	# application. Its index.theme inherits from gnome,hicolor, and hicolor only
+	# holds a handful of apps, so wofi showed generic placeholders for anything
+	# that was not in the bundle.
+	#
+	# Numix is installed as a fallback for exactly this reason, but installing it
+	# is not enough - it has to be named in the inheritance chain, or GTK never
+	# looks there. Appending it means a missing icon resolves to the Numix
+	# drawing instead of the default placeholder.
+	icons_ensure_inherits "${dest}"
 
 	# Refresh the caches if the tools are available.
 	if have gtk-update-icon-cache; then

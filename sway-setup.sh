@@ -254,7 +254,7 @@ opt_desc() {
 	icons) printf 'The lime folders and black application glyphs from the screenshot.' ;;
 	wall) printf 'The exact wallpaper from the original post.' ;;
 	dots) printf 'All configuration files; existing ones are backed up first.' ;;
-	session) printf "Adds 'Sway (Everforest)' to lightdm / gdm3 / sddm / greetd." ;;
+	session) printf "Adds 'Sway' to lightdm / gdm3 / sddm / greetd." ;;
 	shell) printf 'The two-column fetch block shown in the terminal screenshot.' ;;
 	sddm) printf 'Boots to a graphical login; pick the Sway session there.' ;;
 	esac
@@ -1905,6 +1905,74 @@ EOF
 	return 0
 }
 
+# Make sure the fallback themes are named in the icon theme's inheritance chain.
+#
+# GTK resolves an icon by walking the theme, then each theme in its `Inherits`
+# list in order. The bundled set contains no per-application artwork, so any app
+# it does not carry - which is most of them - has to come from a later entry.
+# With only gnome,hicolor in that list a browser fell through to the stock
+# placeholder even though the Numix drawings were installed on the same machine.
+#
+# Numix-Circle first, because it is the closest match to this theme's shape, then
+# Numix, then the original tail. Duplicates are dropped so re-running the
+# installer does not grow the line.
+icons_ensure_inherits() {
+	local dest="$1"
+	local index="${dest}/index.theme"
+	[[ -f "${index}" ]] || return 0
+
+	# Which of the fallback themes are actually present? Naming an absent theme
+	# is harmless but pointless, and it makes the file harder to read.
+	local -a want=()
+	local t
+	for t in Numix-Circle Numix; do
+		if [[ -d "/usr/share/icons/${t}" || -d "/usr/local/share/icons/${t}" ||
+		      -d "${HOME_DIR}/.local/share/icons/${t}" ]]; then
+			want+=("${t}")
+		fi
+	done
+
+	local tail="gnome,hicolor"
+	local cur
+	cur="$(sed -n 's/^Inherits=//p' "${index}" 2>/dev/null | head -1)"
+	[[ -n "${cur}" ]] && tail="${cur}"
+
+	# Build the new list: our fallbacks first, then whatever was there.
+	local -a all=("${want[@]}")
+	local IFS=',' part
+	for part in ${tail}; do
+		[[ -n "${part}" ]] && all+=("${part}")
+	done
+	unset IFS
+
+	local -a uniq=()
+	local seen=" " p
+	for p in "${all[@]}"; do
+		case "${seen}" in
+		*" ${p} "*) continue ;;
+		esac
+		seen="${seen}${p} "
+		uniq+=("${p}")
+	done
+
+	[[ ${#uniq[@]} -eq 0 ]] && return 0
+
+	local joined
+	joined="$(printf '%s,' "${uniq[@]}")"
+	joined="${joined%,}"
+
+	# Already correct? Leave the file alone.
+	[[ "${cur}" == "${joined}" ]] && return 0
+
+	if grep -q '^Inherits=' "${index}" 2>/dev/null; then
+		sed -i "s|^Inherits=.*|Inherits=${joined}|" "${index}"
+	else
+		printf 'Inherits=%s\n' "${joined}" >>"${index}"
+	fi
+	ui_dim "icon fallback chain: ${joined}"
+	return 0
+}
+
 icons_install() {
 	ui_hdr "Icon theme"
 	if [[ ${OPT_DRY_RUN} -eq 1 ]]; then ui_dim "would install ${ICON_NAME}"; return 0; fi
@@ -1937,6 +2005,18 @@ icons_install() {
 			return 1
 		fi
 	fi
+
+	# The bundled set is deliberately small: it carries the Everforest folder
+	# colours and the panel/status glyphs the bar uses, not one icon per
+	# application. Its index.theme inherits from gnome,hicolor, and hicolor only
+	# holds a handful of apps, so wofi showed generic placeholders for anything
+	# that was not in the bundle.
+	#
+	# Numix is installed as a fallback for exactly this reason, but installing it
+	# is not enough - it has to be named in the inheritance chain, or GTK never
+	# looks there. Appending it means a missing icon resolves to the Numix
+	# drawing instead of the default placeholder.
+	icons_ensure_inherits "${dest}"
 
 	# Refresh the caches if the tools are available.
 	if have gtk-update-icon-cache; then
@@ -2336,26 +2416,34 @@ input type:touchpad {
     natural_scroll enabled
     dwt enabled
 }
-# Touchscreen. sway treats a touch panel as an absolute pointer, so these are
-# pointer-emulation settings rather than touch gestures: what the finger does is
-# translated into button events.
+# Touchscreen.
 #
-# `tap enabled` is the one that matters most - libinput leaves tap off by
-# default, and a tap doing nothing is what makes a touch panel feel broken.
+# A touch panel is an absolute pointer: libinput turns a finger into button
+# presses and motion, and that is the whole model. There is no gesture layer.
 #
-# `tap_button_map lrm` maps one finger to the left button, two to the right and
-# three to the middle. sway has no long-press option at all (libinput exposes no
-# such setting and the compositor never sees per-touch timing), so two fingers
-# is the closest equivalent to "long press for the context menu".
+# Only two of the input options do anything here, and it is worth saying why the
+# obvious ones are absent:
 #
-# drag/drag_lock keep a hold-and-move working as a drag without the finger
-# having to stay perfectly still, and natural_scroll matches the touchpad above.
+#   tap / tap_button_map   These are *touchpad* features. sway applies them
+#                          through libinput_device_config_tap_*, which refuses
+#                          any device whose tap finger count is 0 - and a
+#                          touchscreen's is 0. Writing them here looks correct
+#                          and silently does nothing, which is worse than
+#                          leaving them out: a single finger tap already sends
+#                          the left button without any configuration, so a
+#                          working tap makes the config look like it took
+#                          effect when it never ran. Two-finger "right click"
+#                          does not exist on a touch panel for the same reason.
+#
+#   natural_scroll         A touchscreen does not scroll. Its events are pointer
+#                          motion, so there is nothing for this to reverse.
+#
+# What is left is dragging: holding a finger and moving drives a button-down
+# drag, and drag_lock keeps it going when the finger is lifted and put back
+# down within the timeout. Both are genuine touch-panel options.
 input type:touch {
-    tap enabled
-    tap_button_map lrm
     drag enabled
     drag_lock enabled
-    natural_scroll enabled
 }
 input type:keyboard {
     xkb_options ctrl:nocaps
@@ -5431,6 +5519,25 @@ BASHRC
 
 SESSION_DIR="/usr/share/wayland-sessions"
 
+# Move aside the session entries that the distro packages installed.
+#
+# Only files this installer did not write are touched, and only the two known
+# names, so a hand-written session of the user's own stays where it is.
+session_hide_package_entries() {
+	local f
+	for f in sway weston; do
+		local src="${SESSION_DIR}/${f}.desktop"
+		[[ -f "${src}" ]] || continue
+		# Never touch our own file, even if the names ever collide.
+		[[ "${f}" == "${SESSION_FILE%.desktop}" ]] && continue
+		backup_path "${src}"
+		if rm -f "${src}" 2>/dev/null; then
+			ui_dim "hid the bundled '${f}' session entry (${src})"
+		fi
+	done
+	return 0
+}
+
 session_install() {
 	ui_hdr "Login session"
 	local dest="${SESSION_DIR}/${SESSION_FILE}"
@@ -5440,7 +5547,7 @@ session_install() {
 	if [[ -e "${dest}" ]]; then backup_path "${dest}"; fi
 	cat >"${dest}" <<'DESKTOP'
 [Desktop Entry]
-Name=Sway (Everforest)
+Name=Sway
 Comment=Sway with the Everforest rice (Wayland, i3-compatible)
 Exec=/usr/local/bin/sway-everforest-session
 Type=Application
@@ -5451,6 +5558,25 @@ DESKTOP
 	register_file "${dest}"
 	ui_ok "wrote ${dest}"
 
+	# Hide the session entries that come with the packages this installer pulls
+	# in. They are not ours and they do not work here:
+	#
+	#   sway.desktop    ships with `sway`, but on this system /usr/bin/sway is
+	#                   swayfx and the configuration uses blur/blur_xray/
+	#                   layer_effects. Logging in through this entry starts the
+	#                   compositor with the same config, which is fine, but it
+	#                   also tempts the user into a session that is not the rice.
+	#
+	#   weston.desktop  ships with `weston`, which is installed only as the
+	#                   kiosk compositor behind the SDDM greeter. It is not a
+	#                   desktop the user should pick, and doing so lands in an
+	#                   empty weston shell.
+	#
+	# Both are moved aside rather than deleted, so removing this installer does
+	# not lose anything that belonged to a package: --uninstall puts the backups
+	# back through the normal backup mechanism.
+	session_hide_package_entries
+
 	# Make sure sway is the login shell of nothing weird; just report the
 	# available display managers so the message is actionable.
 	local dm=""
@@ -5459,7 +5585,7 @@ DESKTOP
 	if [[ -z "${dm}" ]] && have sddm; then dm="sddm"; fi
 	if [[ -z "${dm}" ]] && have greetd; then dm="greetd"; fi
 	if [[ -n "${dm}" ]]; then
-		ui_dim "display manager detected: ${dm} - pick 'Sway (Everforest)' at login"
+		ui_dim "display manager detected: ${dm} - pick 'Sway' at login"
 	else
 		ui_dim "no display manager yet: enable the 'sddm' component to get a greeter"
 	fi
@@ -5715,7 +5841,7 @@ EOF
 sddm_write_wayland_wrapper() {
 	cat >"${SDDM_XSESSION_WRAPPER}" <<'EOF'
 #!/bin/sh
-# Launcher for the Sway (Everforest) session, used by the wayland-sessions
+# Launcher for the Sway session, used by the wayland-sessions
 # entry. SDDM hands over a minimal environment, so everything sway and the
 # applications under it expect is set here.
 
@@ -6576,7 +6702,7 @@ NOTES
   Everything the look needs (theme, icons, wallpaper) is embedded, so it
   also works with no network at all.
   After installing, reboot: SDDM shows the SilentSDDM greeter, and picking
-  "Sway (Everforest)" logs straight into the desktop.
+  "Sway" logs straight into the desktop.
   On a machine with no display manager at all, choose the "sddm" component.
 
 KEYBINDINGS AFTER INSTALL
@@ -6893,7 +7019,7 @@ print_summary() {
 	ui_hdr "Done"
 	ui_ok "Sway Everforest is installed for user ${TARGET_USER}"
 	printf '\n'
-	ui_line "Log out and choose ${C_BOLD}Sway (Everforest)${C_RESET} at the login screen,"
+	ui_line "Log out and choose ${C_BOLD}Sway${C_RESET} at the login screen,"
 	ui_line "or start it from a TTY with:  ${C_LIME}sway${C_RESET}"
 	printf '\n'
 	ui_line "Keybindings:"

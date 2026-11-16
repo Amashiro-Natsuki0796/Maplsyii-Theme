@@ -58,7 +58,7 @@ opt_desc() {
 	icons) printf 'The lime folders and black application glyphs from the screenshot.' ;;
 	wall) printf 'The exact wallpaper from the original post.' ;;
 	dots) printf 'All configuration files; existing ones are backed up first.' ;;
-	session) printf "Adds 'Sway (Everforest)' to lightdm / gdm3 / sddm / greetd." ;;
+	session) printf "Adds 'Sway' to lightdm / gdm3 / sddm / greetd." ;;
 	shell) printf 'The two-column fetch block shown in the terminal screenshot.' ;;
 	sddm) printf 'Boots to a graphical login; pick the Sway session there.' ;;
 	esac
