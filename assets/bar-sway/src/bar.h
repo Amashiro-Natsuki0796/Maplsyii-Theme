@@ -228,6 +228,15 @@ typedef struct {
 	 * list nor the CPU graph. */
 	int title_dirty;
 
+	/* Set when the clock text actually changed, i.e. once a minute.
+	 *
+	 * The clock is not part of the CPU graph, so the per-tick
+	 * bar_draw_graph_only() never repainted it: the time sat at whatever it was
+	 * when the bar last did a full draw, and only a hover or a workspace switch
+	 * refreshed it. Tracking the change here gives the clock its own repaint
+	 * trigger without redrawing the whole bar on every one-second tick. */
+	int clock_dirty;
+
 	/* The popup this bar opened, if any.
 	 *
 	 * wofi/rofi run as their own processes and take an exclusive keyboard grab,

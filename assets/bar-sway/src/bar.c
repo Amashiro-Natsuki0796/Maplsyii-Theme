@@ -269,15 +269,27 @@ refresh_workspaces(Bar *b)
 
 }
 
-static void
+/* Re-read the clock. Returns 1 when the text changed, which happens once a
+ * minute for "%H:%M" - the date only changes at midnight but is cheap enough to
+ * compare alongside it. */
+static int
 refresh_clock(Bar *b)
 {
 	time_t t = time(NULL);
 	struct tm tm;
+	char clock[sizeof b->clock];
+	char date[sizeof b->date];
 
 	localtime_r(&t, &tm);
-	strftime(b->clock, sizeof b->clock, "%H:%M", &tm);
-	strftime(b->date, sizeof b->date, "%A %d %B %Y", &tm);
+	strftime(clock, sizeof clock, "%H:%M", &tm);
+	strftime(date, sizeof date, "%A %d %B %Y", &tm);
+
+	if (strcmp(b->clock, clock) == 0 && strcmp(b->date, date) == 0)
+		return 0;
+
+	memcpy(b->clock, clock, sizeof b->clock);
+	memcpy(b->date, date, sizeof b->date);
+	return 1;
 }
 
 static void
@@ -452,7 +464,11 @@ bar_refresh(Bar *b)
 		b->ws_sig = sig;
 	}
 	if (t - b->last_clock >= TICK_CLOCK_MS) {
-		refresh_clock(b);
+		/* Only a real change (once a minute) asks for a repaint; the poll
+		 * loop still calls this every second, which keeps the tick aligned to
+		 * a wall-clock minute rather than drifting. */
+		if (refresh_clock(b))
+			b->clock_dirty = 1;
 		b->last_clock = t;
 	}
 	if (t - b->last_sysinfo >= TICK_SYSINFO_MS) {
@@ -1263,9 +1279,14 @@ main(void)
 			(void)cpu_before;
 			(void)cpu_val_before;
 
-			if (ws_changed || b.title_dirty) {
+			/* A clock change needs a full draw: bar_draw_graph_only() only
+			 * repaints the plot rectangle, so the time text kept whatever it
+			 * was at the last full frame and looked frozen until something
+			 * else happened to redraw the bar. */
+			if (ws_changed || b.title_dirty || b.clock_dirty) {
 				b.ws_dirty = 0;
 				b.title_dirty = 0;
+				b.clock_dirty = 0;
 				bar_draw(&b);
 			} else if (wl_frame_ready(&b.wl)) {
 				/* Only draw when the compositor has already presented the
