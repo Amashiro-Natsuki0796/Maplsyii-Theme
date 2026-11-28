@@ -246,7 +246,32 @@ EOF
 		register_file "${SID_PIN}"
 	fi
 
+	# Force a refresh even if apt-get update already ran earlier in this
+	# install.
+	#
+	# APT_UPDATED exists so the package steps do not refresh the lists over and
+	# over, but the earlier refresh happened before this source file existed -
+	# so the sid index was never fetched and the two -dev packages below were
+	# "unable to locate". Clearing the flag is what makes the next call actually
+	# run apt-get update again.
+	APT_UPDATED=0
 	apt_update_once
+
+	# Prove the packages are reachable before the build tries to install them.
+	# Without this the failure surfaced much later as a wall of "Unable to
+	# locate package" lines from apt, which reads like a broken installer
+	# rather than "the sid mirror could not be reached".
+	if ! apt-cache show libwlroots-0.20-dev >/dev/null 2>&1; then
+		ui_err "libwlroots-0.20-dev is still not visible after adding the sid source"
+		ui_dim "  the source is ${SID_SOURCE}; check that the sid mirror is reachable"
+		return 1
+	fi
+	if ! apt-cache show libscenefx-0.5-dev >/dev/null 2>&1; then
+		ui_err "libscenefx-0.5-dev is still not visible after adding the sid source"
+		ui_dim "  the source is ${SID_SOURCE}; check that the sid mirror is reachable"
+		return 1
+	fi
+
 	return 0
 }
 
